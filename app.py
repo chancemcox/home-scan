@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 import storage
 from storage import device_states
 from cloudflare_sync import Manager
+from ws import Hub
 
 DB = os.getenv('DB_PATH', '/data/homescan.db')
 MODE = os.getenv('SCAN_MODE', 'nmap')
@@ -13,18 +14,28 @@ TOKEN = os.getenv('INGEST_TOKEN', '')
 NETWORK = os.getenv('SCAN_NETWORK', '192.168.1.0/24')
 INTERVAL = 60
 CLOUDFLARE = Manager(DB)
+HUB = Hub()
 
 def now(): return storage.now()
 def connect(): return storage.connect(DB)
+def devices_payload():
+    result = storage.inventory(DB)
+    result.update(mode=MODE,network=NETWORK if MODE=='nmap' else 'Home network',cloudflare=CLOUDFLARE.public_state())
+    return json.dumps(result)
+
+def publish():
+    HUB.broadcast(devices_payload())
+
 def init():
     global CLOUDFLARE
     storage.init(DB)
-    CLOUDFLARE = Manager(DB)
+    CLOUDFLARE = Manager(DB, on_update=publish)
     CLOUDFLARE.init()
 
 def record(hosts, started=None, error=None, source='network'):
     storage.record_batches(DB,[dict(hosts=hosts,started=started,error=error,source=source)])
     CLOUDFLARE.wake.set()
+    publish()
 
 def scanner():
     net = ipaddress.IPv4Network(NETWORK,strict=False)
@@ -51,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Cache-Control','no-store')
         self.send_header('X-Content-Type-Options','nosniff')
         self.send_header('X-Frame-Options','DENY')
-        self.send_header('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+        self.send_header('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
         self.send_header('Content-Length',str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -75,12 +86,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in assets:
             name,mime = assets[self.path]
             return self.send(200,Path(__file__).with_name(name).read_bytes(),mime)
+        if self.path=='/ws': return HUB.serve(self, devices_payload)
         if self.path=='/health': return self.send(200,b'{"ok":true}')
         if self.path=='/api/cloudflare': return self.send(200,json.dumps(CLOUDFLARE.public_state()).encode())
         if self.path!='/api/devices': return self.send(404,b'{}')
-        result = storage.inventory(DB)
-        result.update(mode=MODE,network=NETWORK if MODE=='nmap' else 'Home network',cloudflare=CLOUDFLARE.public_state())
-        self.send(200,json.dumps(result).encode())
+        self.send(200,devices_payload().encode())
 
     def do_POST(self):
         if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync'):
@@ -89,6 +99,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.body()
                 if self.path.endswith('/settings'): CLOUDFLARE.save(body)
                 else: CLOUDFLARE.wake.set()
+                publish()
                 return self.send(200,b'{"ok":true}')
             except (ValueError,KeyError,TypeError) as exc:
                 return self.send(400,json.dumps({'error':str(exc)}).encode())
@@ -102,6 +113,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(batches,list) or not 1 <= len(batches) <= 8: raise ValueError('Invalid sources')
             storage.record_batches(DB,batches)
             CLOUDFLARE.wake.set()
+            publish()
         except (ValueError,KeyError,TypeError) as exc:
             return self.send(400,json.dumps({'error':str(exc)}).encode())
         self.send(200,b'{"ok":true}')

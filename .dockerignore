@@ -2,6 +2,7 @@
 !app.py
 !storage.py
 !cloudflare_sync.py
+!ws.py
 !index.html
 !app.js
 !style.css

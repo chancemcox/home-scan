@@ -64,10 +64,11 @@ def private_ip(value):
 
 
 class Manager:
-    def __init__(self, db_path, config_path=CONFIG, api_factory=API):
+    def __init__(self, db_path, config_path=CONFIG, api_factory=API, on_update=None):
         self.db_path, self.config_path, self.api_factory = db_path,Path(config_path),api_factory
         self.lock = threading.RLock()
         self.wake = threading.Event()
+        self.on_update = on_update
 
     def init(self):
         with storage.connect(self.db_path) as db:
@@ -238,7 +239,9 @@ class Manager:
         while True:
             self.wake.wait(60)
             self.wake.clear()
-            try: self.sync_once()
+            try:
+                self.sync_once()
+                if self.on_update: self.on_update()
             except Exception: pass  # Cloudflare outages must not stop local inventory.
 
 
