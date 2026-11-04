@@ -127,6 +127,13 @@ class Manager:
         tunnels = []
         for row in rows:
             connections = row.get('connections') or []
+            ingress = []
+            if row.get('config_src') == 'cloudflare' and row.get('id'):
+                try:
+                    response = api.call('GET',f"/accounts/{cfg['account_id']}/cfd_tunnel/{row['id']}/configurations") or {}
+                    ingress = (response.get('config') or {}).get('ingress') or []
+                except Exception:
+                    ingress = []
             tunnels.append(dict(
                 id=row.get('id') or '',
                 name=row.get('name') or '',
@@ -135,10 +142,24 @@ class Manager:
                 connections=len(connections),
                 config_src=row.get('config_src') or '',
                 editable=(row.get('config_src') == 'cloudflare'),
+                hostnames=[dict(hostname=r.get('hostname') or '',path=r.get('path') or '',service=r.get('service') or '')
+                           for r in ingress if r.get('hostname') or r.get('path')],
                 homescan=(row.get('id') == cfg.get('tunnel_id')),
             ))
         tunnels.sort(key=lambda t: (not t['homescan'], t['name'].lower()))
         return dict(configured=True, tunnels=tunnels, error='')
+
+    def list_zones(self):
+        try: cfg,api=self._tunnel_api()
+        except ValueError as exc: return dict(zones=[],error=str(exc))
+        try:
+            rows=api.call('GET','/zones?'+urllib.parse.urlencode({'status':'active','per_page':100})) or []
+            zones=[dict(id=z.get('id') or '',name=z.get('name') or '',account_id=(z.get('account') or {}).get('id') or '')
+                   for z in rows if z.get('id') and z.get('name')]
+            zones.sort(key=lambda z:z['name'])
+            return dict(zones=zones,error='')
+        except CloudflareError as exc: return dict(zones=[],error=str(exc))
+        except Exception: return dict(zones=[],error='Could not load Cloudflare domains.')
 
     def _tunnel_api(self):
         try: cfg = self.config()
@@ -270,6 +291,47 @@ class Manager:
                 (link_id,tunnel_id,*key,did))
         self.wake.set()
         return dict(ok=True,id=link_id)
+
+    def create_tunnel_route(self, body):
+        tunnel_id=self._tunnel_id(body.get('tunnel_id'));zone_id=str(body.get('zone_id') or '')
+        did=str(body.get('device_id') or '');label=str(body.get('hostname') or '').strip().lower().rstrip('.')
+        protocol=str(body.get('protocol') or 'http')
+        if protocol not in ('http','https'): raise ValueError('Choose HTTP or HTTPS for the origin.')
+        try: port=int(body.get('port',80))
+        except (TypeError,ValueError): raise ValueError('Port must be between 1 and 65535.') from None
+        if not 1<=port<=65535: raise ValueError('Port must be between 1 and 65535.')
+        if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',label):
+            raise ValueError('Use a single hostname label such as files.')
+        with self.lock,storage.connect(self.db_path) as db:
+            device=db.execute('SELECT * FROM devices WHERE device_id=?',(did,)).fetchone()
+            if not device or not device['mac'] or not did.startswith('mac:'):
+                raise ValueError('Choose a computer with a known MAC address.')
+        ip=private_ip(device['ip']);cfg,api=self._tunnel_api()
+        zone=api.call('GET',f'/zones/{zone_id}') or {}
+        if not zone.get('name') or (zone.get('account') or {}).get('id')!=cfg['account_id']:
+            raise ValueError('Choose an accessible domain from this Cloudflare account.')
+        name=label+'.'+zone['name'].lower().rstrip('.')
+        base=f"/accounts/{cfg['account_id']}/cfd_tunnel/{tunnel_id}"
+        tunnel=api.call('GET',base) or {}
+        if tunnel.get('config_src')!='cloudflare': raise ValueError('Choose a remotely managed tunnel.')
+        response=api.call('GET',base+'/configurations') or {};config=response.get('config') or {'ingress':[{'service':'http_status:404'}]}
+        rules=config.get('ingress') or [{'service':'http_status:404'}]
+        matching=[r for r in rules if r.get('hostname')==name and not r.get('path')]
+        service=f'{protocol}://{ip}:{port}'
+        if len(matching)>1: raise ValueError('That hostname has multiple ingress rules and cannot be managed automatically.')
+        if matching: matching[0]['service']=service
+        else:
+            position=next((i for i,r in enumerate(rules) if not r.get('hostname') and not r.get('path')),len(rules))
+            rules.insert(position,{'hostname':name,'service':service})
+        records=api.call('GET',f'/zones/{zone_id}/dns_records?'+urllib.parse.urlencode({'name':name,'per_page':100})) or []
+        target=tunnel_id+'.cfargotunnel.com'
+        foreign=[r for r in records if r.get('type')!='CNAME' or r.get('content')!=target]
+        if foreign: raise ValueError('An existing DNS record already owns this hostname.')
+        api.call('PUT',base+'/configurations',{'config':dict(config,ingress=rules)})
+        if not records:
+            api.call('POST',f'/zones/{zone_id}/dns_records',dict(type='CNAME',name=name,content=target,proxied=True,ttl=1,
+                                                                 comment='homescan:tunnel-route'))
+        return self.save_tunnel_link(dict(tunnel_id=tunnel_id,hostname=name,path='',device_id=did)) | {'hostname':name}
 
     def _link_status(self, link, state, message='', ip=None):
         with storage.connect(self.db_path) as db:

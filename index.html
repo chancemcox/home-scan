@@ -7,9 +7,9 @@
 <div class="connection-line"><span id="cloud-state">Cloudflare: checking…</span><span id="deco-state">Deco: checking…</span><button id="sync-button" class="text-button">Sync now ↻</button></div>
 <p id="notice" role="status"></p>
 <section class="panel" id="tunnels-panel" aria-labelledby="tunnels-heading">
-<div class="panel-head"><div><h2 id="tunnels-heading">Cloudflare tunnels</h2><p class="panel-copy">Account tunnels visible to the HomeScan API token. The HomeScan-managed tunnel is marked.</p></div><button id="tunnels-refresh" type="button" class="text-button">Refresh ↻</button></div>
+<div class="panel-head"><div><h2 id="tunnels-heading">Cloudflare tunnels</h2><p class="panel-copy">All account tunnels and public hostnames visible to the HomeScan API token.</p></div><div><button id="tunnel-create" type="button">Create tunnel hostname</button><button id="tunnels-refresh" type="button" class="text-button">Refresh ↻</button></div></div>
 <p id="tunnels-meta" class="filter-meta" aria-live="polite"></p>
-<div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Connections</th><th>Created</th><th>ID</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="tunnel-rows"><tr><td colspan="6">Connect Cloudflare, then refresh to load tunnels.</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Name</th><th>Public hostnames</th><th>Status</th><th>Connections</th><th>Created</th><th>ID</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="tunnel-rows"><tr><td colspan="7">Connect Cloudflare, then refresh to load tunnels.</td></tr></tbody></table></div>
 </section>
 <div class="toolbar"><h2>Device inventory</h2><div class="filters"><label class="filter"><span class="sr-only">Status</span><select id="filter-status" aria-label="Filter by status"><option value="">All statuses</option><option value="seen">Seen</option><option value="not_seen">Not seen</option><option value="unknown">Unavailable</option></select></label><label class="filter"><span class="sr-only">Cloudflare</span><select id="filter-cloudflare" aria-label="Filter by Cloudflare"><option value="">All Cloudflare</option><option value="enabled">Routes enabled</option><option value="disabled">Not enabled</option><option value="attention">Needs attention</option></select></label><input id="search" type="search" placeholder="Search name, IP, MAC, or URL…" aria-label="Search devices"></div></div>
 <p id="filter-meta" class="filter-meta" aria-live="polite"></p>
@@ -60,6 +60,7 @@
 <div class="dialog-head"><div><small class="eyebrow">CLOUDFLARE TUNNEL</small><h2>Edit tunnel</h2></div><button type="button" class="close" data-close="tunnel-dialog" aria-label="Close tunnel editor">×</button></div>
 <p id="tunnel-edit-id" class="mono"></p>
 <label for="tunnel-edit-name">Tunnel name</label><input id="tunnel-edit-name" maxlength="100" required autocomplete="off">
+<fieldset><legend>Ingress ports</legend><div id="tunnel-rule-ports"></div></fieldset>
 <label for="tunnel-edit-config">Remote configuration (JSON)</label><textarea id="tunnel-edit-config" rows="16" spellcheck="false" required></textarea>
 <p class="hint">The last ingress rule must be a catch-all. HomeScan-managed device routes must be changed from the device inventory.</p>
 <fieldset><legend>Automatic origin IP</legend>
@@ -73,4 +74,14 @@
 <div class="dialog-actions"><button type="button" data-close="tunnel-dialog">Cancel</button><button id="tunnel-edit-save" class="primary" type="submit">Save tunnel</button></div>
 </form>
 </dialog>
+<dialog id="create-route-dialog"><form id="create-route-form">
+<div class="dialog-head"><div><small class="eyebrow">PUBLIC HOSTNAME</small><h2>Create tunnel hostname</h2></div><button type="button" class="close" data-close="create-route-dialog" aria-label="Close create tunnel hostname">×</button></div>
+<p>Create a public hostname on an active tunnel and link its origin to a MAC-identified computer.</p>
+<label for="create-route-tunnel">Tunnel</label><select id="create-route-tunnel" required></select>
+<label for="create-route-zone">Domain</label><select id="create-route-zone" required></select>
+<label for="create-route-host">Hostname</label><input id="create-route-host" placeholder="files" required autocomplete="off">
+<label for="create-route-device">Computer</label><select id="create-route-device" required></select>
+<div class="split"><div><label for="create-route-protocol">Protocol</label><select id="create-route-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div><div><label for="create-route-port">Port</label><input id="create-route-port" type="number" min="1" max="65535" value="80" required></div></div>
+<p id="create-route-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" data-close="create-route-dialog">Cancel</button><button id="create-route-save" class="primary" type="submit">Create hostname</button></div>
+</form></dialog>
 </body></html>

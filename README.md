@@ -46,6 +46,8 @@ The Cloudflare tunnels table can edit the name and complete JSON ingress configu
 
 An existing remotely managed ingress rule can also be linked to any inventoried computer with a MAC address. On every scan HomeScan resolves that MAC's current private IPv4 address and updates only the hostname portion of the rule's origin service, preserving its protocol, port, path, query, and fragment. A missing/stale MAC or an unavailable Cloudflare API leaves the last known route intact and reports a waiting/error state for automatic retry.
 
+The tunnel inventory shows public hostnames and origin services for every remotely managed tunnel visible to the token. **Edit** provides a numeric port control for each URL-based ingress rule in addition to the advanced JSON editor. **Create tunnel hostname** can add a proxied CNAME and ingress rule on any accessible active zone, select its tunnel, computer, protocol, and port, and automatically creates the MAC link. To use multiple domains, the Cloudflare token must have Zone Read and DNS Edit access to each zone; zones outside the token's scope are intentionally not shown.
+
 The tunnel publishes the selected service to the Internet. Use the service's authentication or configure Cloudflare Access. For HTTPS names like `nas-web.house.chancecox.com`, a standard Universal SSL certificate on the `chancecox.com` zone does not cover that depth. Configure an appropriate edge certificate (for example Advanced Certificate Manager / Total TLS). No certificate purchases or account-plan changes are made by HomeScan. Local DNS-only HTTPS is handled by the local service's own certificate.
 
 Cloudflare references:

@@ -93,6 +93,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=='/health': return self.send(200,b'{"ok":true}')
         if self.path=='/api/cloudflare': return self.send(200,json.dumps(CLOUDFLARE.public_state()).encode())
         if self.path=='/api/cloudflare/tunnels': return self.send(200,json.dumps(CLOUDFLARE.list_tunnels()).encode())
+        if self.path=='/api/cloudflare/zones': return self.send(200,json.dumps(CLOUDFLARE.list_zones()).encode())
         if parsed.path=='/api/cloudflare/tunnel':
             try:
                 tunnel_id = parse_qs(parsed.query).get('id',[''])[0]
@@ -108,7 +109,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200,devices_payload().encode())
 
     def do_POST(self):
-        if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync','/api/cloudflare/tunnels/update','/api/cloudflare/tunnels/link','/api/deco/settings'):
+        if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync','/api/cloudflare/tunnels/update','/api/cloudflare/tunnels/link','/api/cloudflare/tunnels/create-route','/api/deco/settings'):
             if not self.same_origin(): return self.send(403,b'{"error":"Use the HomeScan dashboard to change settings."}')
             try:
                 body = self.body()
@@ -122,6 +123,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(200,json.dumps(result).encode())
                 if self.path=='/api/cloudflare/tunnels/link':
                     result = CLOUDFLARE.save_tunnel_link(body)
+                    publish()
+                    return self.send(200,json.dumps(result).encode())
+                if self.path=='/api/cloudflare/tunnels/create-route':
+                    result=CLOUDFLARE.create_tunnel_route(body)
                     publish()
                     return self.send(200,json.dumps(result).encode())
                 if self.path.endswith('/settings'): CLOUDFLARE.save(body)

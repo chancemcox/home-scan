@@ -1,6 +1,6 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},selected=null,editingTunnel=null,editingTunnelDetail=null;
+let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},selected=null,editingTunnel=null,editingTunnelDetail=null,tunnelInventory=[],zoneInventory=[];
 let sortKey='hostname',sortDir=1;
 let suffix='.house.chancecox.com';
 const statusRank={seen:0,unknown:1,not_seen:2};
@@ -53,13 +53,15 @@ function render(){
 }
 function renderTunnels(payload){
  const body=$('tunnel-rows');body.replaceChildren();
+ tunnelInventory=payload.tunnels||[];
  if(payload.error){$('tunnels-meta').textContent=payload.error}
  else{$('tunnels-meta').textContent=payload.tunnels?.length?`${payload.tunnels.length} tunnel${payload.tunnels.length===1?'':'s'}`:'No tunnels returned for this account.'}
- if(!payload.tunnels?.length){const tr=document.createElement('tr');const td=cell(tr,payload.error||'No tunnels found.');td.colSpan=6;body.append(tr);return}
+ if(!payload.tunnels?.length){const tr=document.createElement('tr');const td=cell(tr,payload.error||'No tunnels found.');td.colSpan=7;body.append(tr);return}
  for(const t of payload.tunnels){
   const tr=document.createElement('tr');
   const name=cell(tr,t.name||'Unnamed tunnel');
   if(t.homescan){const badge=document.createElement('small');badge.className='badge';badge.textContent='HomeScan';name.append(badge)}
+  const hosts=cell(tr,'');if(!t.hostnames?.length)hosts.textContent='—';for(const route of t.hostnames||[]){const tag=document.createElement('span');tag.className='route-tag';tag.textContent=`${route.hostname||'*'}${route.path?' · '+route.path:''} → ${route.service}`;hosts.append(tag)}
   cell(tr,t.status||'unknown',t.status==='healthy'?'up':t.connections?'unknown':'down');
   cell(tr,String(t.connections??0));
   cell(tr,t.created_at?new Date(t.created_at).toLocaleString():'—');
@@ -73,8 +75,13 @@ async function openTunnel(id){
  $('tunnel-edit-id').textContent=id;$('tunnel-edit-name').value='Loading…';$('tunnel-edit-config').value='';$('tunnel-dialog').showModal();
  try{
   const r=await fetch('/api/cloudflare/tunnel?id='+encodeURIComponent(id));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');
-  editingTunnelDetail=result;$('tunnel-edit-name').value=result.name;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderTunnelLinks();$('tunnel-edit-save').disabled=false;
+  editingTunnelDetail=result;$('tunnel-edit-name').value=result.name;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderPortEditors();renderTunnelLinks();$('tunnel-edit-save').disabled=false;
  }catch(e){$('tunnel-edit-error').textContent=e.message}
+}
+function renderPortEditors(){
+ const box=$('tunnel-rule-ports');box.replaceChildren();
+ (editingTunnelDetail?.config?.ingress||[]).forEach((rule,index)=>{let url;try{url=new URL(rule.service)}catch(_){return}if(!['http:','https:','tcp:','ssh:','rdp:','smb:'].includes(url.protocol))return;const row=document.createElement('div');row.className='port-editor';const label=document.createElement('label');label.textContent=`${rule.hostname||'*'}${rule.path?' · '+rule.path:''}`;const input=document.createElement('input');input.type='number';input.min='1';input.max='65535';input.value=url.port||({'http:':80,'https:':443}[url.protocol]||'');input.addEventListener('input',()=>{if(!input.value)return;url.port=input.value;editingTunnelDetail.config.ingress[index].service=url.toString().replace(/\/$/,'');$('tunnel-edit-config').value=JSON.stringify(editingTunnelDetail.config,null,2)});row.append(label,input);box.append(row)});
+ if(!box.children.length)box.textContent='No URL-based ingress services have editable ports.';
 }
 function renderTunnelLinks(){
  const detail=editingTunnelDetail;if(!detail)return;
@@ -87,7 +94,7 @@ function renderTunnelLinks(){
  for(const link of detail.links||[]){const row=document.createElement('div');row.className='linked-origin';const device=data.find(d=>d.device_id===link.device_id);const text=document.createElement('span');text.textContent=`${link.hostname||'*'}${link.path?' · '+link.path:''} → ${device?.hostname||device?.ip||link.device_id} · ${link.message||link.state}`;const remove=document.createElement('button');remove.type='button';remove.textContent='Unlink';remove.addEventListener('click',()=>removeTunnelLink(link.id));row.append(text,remove);list.append(row)}
 }
 async function reloadTunnelDetail(){
- const r=await fetch('/api/cloudflare/tunnel?id='+encodeURIComponent(editingTunnel));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');editingTunnelDetail=result;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderTunnelLinks();
+ const r=await fetch('/api/cloudflare/tunnel?id='+encodeURIComponent(editingTunnel));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');editingTunnelDetail=result;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderPortEditors();renderTunnelLinks();
 }
 async function removeTunnelLink(id){try{await post('/api/cloudflare/tunnels/link',{action:'delete',link_id:id});await reloadTunnelDetail()}catch(e){$('tunnel-edit-error').textContent=e.message}}
 async function loadTunnels(){
@@ -97,6 +104,14 @@ async function loadTunnels(){
   if(!r.ok)throw Error('Request failed');
   renderTunnels(await r.json());
  }catch(e){renderTunnels({tunnels:[],error:'Could not load Cloudflare tunnels.'})}
+}
+async function openCreateRoute(){
+ $('create-route-error').textContent='';
+ const tunnel=$('create-route-tunnel');tunnel.replaceChildren();for(const t of tunnelInventory.filter(t=>t.editable)){const o=document.createElement('option');o.value=t.id;o.textContent=`${t.name} · ${t.status}`;tunnel.append(o)}
+ const devices=$('create-route-device');devices.replaceChildren();for(const d of data.filter(d=>d.mac).sort((a,b)=>(a.hostname||a.ip).localeCompare(b.hostname||b.ip))){const o=document.createElement('option');o.value=d.device_id;o.textContent=`${d.hostname||'Unnamed'} · ${d.ip} · ${d.mac}`;devices.append(o)}
+ const zones=$('create-route-zone');zones.replaceChildren();
+ try{const r=await fetch('/api/cloudflare/zones');const result=await r.json();if(!r.ok||result.error)throw Error(result.error||'Could not load domains');zoneInventory=result.zones||[];for(const z of zoneInventory){const o=document.createElement('option');o.value=z.id;o.textContent=z.name;zones.append(o)}}catch(e){$('create-route-error').textContent=e.message}
+ $('create-route-save').disabled=!tunnel.options.length||!zones.options.length||!devices.options.length;$('create-route-dialog').showModal();
 }
 function openDevice(d){
  selected=d.device_id;const routes=routesFor(selected);const local=routes.find(r=>r.kind==='local');const tunnel=routes.find(r=>r.kind==='tunnel');
@@ -148,12 +163,14 @@ $('tunnel-link-save').addEventListener('click',async()=>{
  try{const rule=editingTunnelDetail.config.ingress[Number($('tunnel-link-rule').value)];await post('/api/cloudflare/tunnels/link',{tunnel_id:editingTunnel,hostname:rule.hostname||'',path:rule.path||'',device_id:$('tunnel-link-device').value});await reloadTunnelDetail()}
  catch(e){$('tunnel-edit-error').textContent=e.message}finally{$('tunnel-link-save').disabled=false}
 });
+$('create-route-form').addEventListener('submit',async event=>{event.preventDefault();$('create-route-save').disabled=true;$('create-route-error').textContent='';try{await post('/api/cloudflare/tunnels/create-route',{tunnel_id:$('create-route-tunnel').value,zone_id:$('create-route-zone').value,hostname:$('create-route-host').value,device_id:$('create-route-device').value,protocol:$('create-route-protocol').value,port:Number($('create-route-port').value)});$('create-route-dialog').close();$('create-route-host').value='';await loadTunnels();await refresh()}catch(e){$('create-route-error').textContent=e.message}finally{$('create-route-save').disabled=false}});
 for(const id of ['local-enabled','tunnel-enabled'])$(id).addEventListener('change',updateFields);
 $('deco-enabled').addEventListener('change',updateDecoFields);
 for(const button of document.querySelectorAll('[data-close]'))button.addEventListener('click',()=>$(button.dataset.close).close());
 $('connection-button').addEventListener('click',()=>{$('connection-status').textContent=cf.configured?'Connected to '+cf.zone+(cf.tunnel_configured?' with tunnel support.':' for local DNS.'):'Cloudflare is not connected yet.';$('connection-dialog').showModal()});
 $('settings-button').addEventListener('click',openSettings);
 $('tunnels-refresh').addEventListener('click',loadTunnels);
+$('tunnel-create').addEventListener('click',openCreateRoute);
 $('sync-button').addEventListener('click',async()=>{try{await post('/api/cloudflare/sync',{});$('cloud-state').textContent='Cloudflare sync queued…'}catch(e){$('notice').textContent=e.message}});
 $('search').addEventListener('input',render);
 $('filter-status').addEventListener('change',render);

@@ -61,6 +61,16 @@ class TunnelEditingAPI:
         if method=='GET': return [copy.deepcopy(self.tunnel)]
         raise AssertionError((method,path,body))
 
+class RouteCreationAPI(TunnelEditingAPI):
+    def __init__(self):
+        super().__init__();self.records=[]
+    def call(self,method,path,body=None):
+        if path=='/zones/zone2': return {'id':'zone2','name':'other.example','account':{'id':'account'}}
+        if path.startswith('/zones/zone2/dns_records'):
+            if method=='GET': return copy.deepcopy(self.records)
+            record=dict(body,id='dns1');self.records.append(record);self.writes.append((method,path,copy.deepcopy(body)));return record
+        return super().call(method,path,body)
+
 class IntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
@@ -214,6 +224,17 @@ class TunnelEditingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'URL-based'):
             self.m.save_tunnel_link(dict(tunnel_id=TunnelEditingAPI.TID,hostname='docs.example.com',
                                          path='',device_id=self.did))
+
+    def test_create_hostname_on_different_domain_with_port_and_mac_link(self):
+        self.api=RouteCreationAPI();self.m=Manager(self.db,self.cfg,lambda token:self.api);self.m.init()
+        result=self.m.create_tunnel_route(dict(tunnel_id=TunnelEditingAPI.TID,zone_id='zone2',hostname='files',
+                                                device_id=self.did,protocol='https',port=8443))
+        self.assertEqual(result['hostname'],'files.other.example')
+        rule=next(r for r in self.api.config['ingress'] if r.get('hostname')=='files.other.example')
+        self.assertEqual(rule['service'],'https://192.168.2.5:8443')
+        self.assertEqual(self.api.records[0]['content'],TunnelEditingAPI.TID+'.cfargotunnel.com')
+        link=self.m.public_state()['tunnel_links'][0]
+        self.assertEqual((link['hostname'],link['device_id']),('files.other.example',self.did))
 
 class MigrationTests(unittest.TestCase):
     def test_legacy_rows_merge_by_mac_with_history_preserved(self):
