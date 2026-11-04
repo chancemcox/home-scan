@@ -162,6 +162,8 @@ class TunnelEditingTests(unittest.TestCase):
         self.cfg.write_text(json.dumps(dict(api_token='test-secret',account_id='account',zone_id='zone',
                                             zone_name='example.com',tunnel_id=TunnelEditingAPI.TID)))
         self.api=TunnelEditingAPI();self.m=Manager(self.db,self.cfg,lambda token:self.api);self.m.init()
+        storage.record_batches(self.db,[dict(source='network',hosts=[dict(ip='192.168.2.5',mac=MAC,hostname='NAS')])])
+        self.did='mac:'+MAC
 
     def test_load_and_update_existing_tunnel(self):
         detail=self.m.get_tunnel(TunnelEditingAPI.TID)
@@ -189,6 +191,29 @@ class TunnelEditingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'device settings'):
             self.m.update_tunnel(dict(tunnel_id=TunnelEditingAPI.TID,name='paperless',config=desired))
         self.assertEqual(self.api.writes,[])
+
+    def test_link_existing_rule_follows_mac_ip_and_unlinks(self):
+        self.api.config['ingress'][0]['service']='http://192.168.2.10:8000/base?q=1#part'
+        result=self.m.save_tunnel_link(dict(tunnel_id=TunnelEditingAPI.TID,hostname='docs.example.com',
+                                            path='',device_id=self.did))
+        self.m.sync_once()
+        self.assertEqual(self.api.config['ingress'][0]['service'],'http://192.168.2.5:8000/base?q=1#part')
+        storage.record_batches(self.db,[dict(source='network',hosts=[dict(ip='192.168.1.77',mac=MAC,hostname='NAS')])])
+        self.m.sync_once()
+        self.assertEqual(self.api.config['ingress'][0]['service'],'http://192.168.1.77:8000/base?q=1#part')
+        link=self.m.public_state()['tunnel_links'][0]
+        self.assertEqual((link['state'],link['synced_ip']),('synced','192.168.1.77'))
+        self.m.save_tunnel_link(dict(action='delete',link_id=result['id']))
+        self.assertEqual(self.m.public_state()['tunnel_links'],[])
+
+    def test_link_validation_and_waiting_mac(self):
+        with self.assertRaisesRegex(ValueError,'unique'):
+            self.m.save_tunnel_link(dict(tunnel_id=TunnelEditingAPI.TID,hostname='missing.example.com',
+                                         path='',device_id=self.did))
+        self.api.config['ingress'][0]['service']='http_status:404'
+        with self.assertRaisesRegex(ValueError,'URL-based'):
+            self.m.save_tunnel_link(dict(tunnel_id=TunnelEditingAPI.TID,hostname='docs.example.com',
+                                         path='',device_id=self.did))
 
 class MigrationTests(unittest.TestCase):
     def test_legacy_rows_merge_by_mac_with_history_preserved(self):

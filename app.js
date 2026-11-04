@@ -1,6 +1,6 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},selected=null,editingTunnel=null;
+let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},selected=null,editingTunnel=null,editingTunnelDetail=null;
 let sortKey='hostname',sortDir=1;
 let suffix='.house.chancecox.com';
 const statusRank={seen:0,unknown:1,not_seen:2};
@@ -73,9 +73,23 @@ async function openTunnel(id){
  $('tunnel-edit-id').textContent=id;$('tunnel-edit-name').value='Loading…';$('tunnel-edit-config').value='';$('tunnel-dialog').showModal();
  try{
   const r=await fetch('/api/cloudflare/tunnel?id='+encodeURIComponent(id));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');
-  $('tunnel-edit-name').value=result.name;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);$('tunnel-edit-save').disabled=false;
+  editingTunnelDetail=result;$('tunnel-edit-name').value=result.name;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderTunnelLinks();$('tunnel-edit-save').disabled=false;
  }catch(e){$('tunnel-edit-error').textContent=e.message}
 }
+function renderTunnelLinks(){
+ const detail=editingTunnelDetail;if(!detail)return;
+ const ruleSelect=$('tunnel-link-rule');ruleSelect.replaceChildren();
+ (detail.config.ingress||[]).forEach((rule,index)=>{if(!rule.hostname&&!rule.path)return;const option=document.createElement('option');option.value=String(index);option.textContent=`${rule.hostname||'*'}${rule.path?' · '+rule.path:''} → ${rule.service}`;ruleSelect.append(option)});
+ const deviceSelect=$('tunnel-link-device');deviceSelect.replaceChildren();
+ for(const d of data.filter(d=>d.mac).sort((a,b)=>(a.hostname||a.ip).localeCompare(b.hostname||b.ip))){const option=document.createElement('option');option.value=d.device_id;option.textContent=`${d.hostname||'Unnamed'} · ${d.ip} · ${d.mac}`;deviceSelect.append(option)}
+ $('tunnel-link-save').disabled=!ruleSelect.options.length||!deviceSelect.options.length;
+ const list=$('tunnel-links');list.replaceChildren();
+ for(const link of detail.links||[]){const row=document.createElement('div');row.className='linked-origin';const device=data.find(d=>d.device_id===link.device_id);const text=document.createElement('span');text.textContent=`${link.hostname||'*'}${link.path?' · '+link.path:''} → ${device?.hostname||device?.ip||link.device_id} · ${link.message||link.state}`;const remove=document.createElement('button');remove.type='button';remove.textContent='Unlink';remove.addEventListener('click',()=>removeTunnelLink(link.id));row.append(text,remove);list.append(row)}
+}
+async function reloadTunnelDetail(){
+ const r=await fetch('/api/cloudflare/tunnel?id='+encodeURIComponent(editingTunnel));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');editingTunnelDetail=result;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderTunnelLinks();
+}
+async function removeTunnelLink(id){try{await post('/api/cloudflare/tunnels/link',{action:'delete',link_id:id});await reloadTunnelDetail()}catch(e){$('tunnel-edit-error').textContent=e.message}}
 async function loadTunnels(){
  $('tunnels-meta').textContent='Loading tunnels…';
  try{
@@ -128,6 +142,11 @@ $('tunnel-form').addEventListener('submit',async event=>{
   $('tunnel-dialog').close();await loadTunnels();
  }catch(e){$('tunnel-edit-error').textContent=e.message}
  finally{$('tunnel-edit-save').disabled=false}
+});
+$('tunnel-link-save').addEventListener('click',async()=>{
+ $('tunnel-link-save').disabled=true;$('tunnel-edit-error').textContent='';
+ try{const rule=editingTunnelDetail.config.ingress[Number($('tunnel-link-rule').value)];await post('/api/cloudflare/tunnels/link',{tunnel_id:editingTunnel,hostname:rule.hostname||'',path:rule.path||'',device_id:$('tunnel-link-device').value});await reloadTunnelDetail()}
+ catch(e){$('tunnel-edit-error').textContent=e.message}finally{$('tunnel-link-save').disabled=false}
 });
 for(const id of ['local-enabled','tunnel-enabled'])$(id).addEventListener('change',updateFields);
 $('deco-enabled').addEventListener('change',updateDecoFields);

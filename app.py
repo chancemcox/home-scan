@@ -108,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200,devices_payload().encode())
 
     def do_POST(self):
-        if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync','/api/cloudflare/tunnels/update','/api/deco/settings'):
+        if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync','/api/cloudflare/tunnels/update','/api/cloudflare/tunnels/link','/api/deco/settings'):
             if not self.same_origin(): return self.send(403,b'{"error":"Use the HomeScan dashboard to change settings."}')
             try:
                 body = self.body()
@@ -118,6 +118,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(200,json.dumps(dict(ok=True,**state)).encode())
                 if self.path=='/api/cloudflare/tunnels/update':
                     result = CLOUDFLARE.update_tunnel(body)
+                    publish()
+                    return self.send(200,json.dumps(result).encode())
+                if self.path=='/api/cloudflare/tunnels/link':
+                    result = CLOUDFLARE.save_tunnel_link(body)
                     publish()
                     return self.send(200,json.dumps(result).encode())
                 if self.path.endswith('/settings'): CLOUDFLARE.save(body)

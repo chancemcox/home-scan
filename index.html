@@ -62,6 +62,13 @@
 <label for="tunnel-edit-name">Tunnel name</label><input id="tunnel-edit-name" maxlength="100" required autocomplete="off">
 <label for="tunnel-edit-config">Remote configuration (JSON)</label><textarea id="tunnel-edit-config" rows="16" spellcheck="false" required></textarea>
 <p class="hint">The last ingress rule must be a catch-all. HomeScan-managed device routes must be changed from the device inventory.</p>
+<fieldset><legend>Automatic origin IP</legend>
+<p>Link an ingress rule to a computer. HomeScan will follow its MAC address and replace the origin IP after every scan while preserving the service protocol and port.</p>
+<label for="tunnel-link-rule">Ingress rule</label><select id="tunnel-link-rule"></select>
+<label for="tunnel-link-device">Computer</label><select id="tunnel-link-device"></select>
+<button id="tunnel-link-save" type="button">Link computer</button>
+<div id="tunnel-links"></div>
+</fieldset>
 <p id="tunnel-edit-error" class="error" role="alert"></p>
 <div class="dialog-actions"><button type="button" data-close="tunnel-dialog">Cancel</button><button id="tunnel-edit-save" class="primary" type="submit">Save tunnel</button></div>
 </form>

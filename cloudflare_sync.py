@@ -82,6 +82,10 @@ class Manager:
             CREATE UNIQUE INDEX IF NOT EXISTS cf_hostname ON cf_routes(hostname) WHERE enabled=1;
             CREATE TABLE IF NOT EXISTS cf_resources(route_id TEXT, hostname TEXT, kind TEXT, record_id TEXT,
                 PRIMARY KEY(route_id,hostname));
+            CREATE TABLE IF NOT EXISTS cf_tunnel_links(id TEXT PRIMARY KEY, tunnel_id TEXT NOT NULL,
+                hostname TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', device_id TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending', message TEXT NOT NULL DEFAULT '', synced_ip TEXT,
+                last_checked TEXT, UNIQUE(tunnel_id,hostname,path));
             ''')
             # Rewrite managed hostnames after the global suffix change; leave cf_resources
             # on the old names so reconcile deletes prior DNS/tunnel ownership.
@@ -101,9 +105,10 @@ class Manager:
         except (ValueError,OSError): cfg = {}
         with storage.connect(self.db_path) as db:
             routes = [dict(r) for r in db.execute('SELECT * FROM cf_routes')]
+            links = [dict(r) for r in db.execute('SELECT * FROM cf_tunnel_links')]
         return dict(configured=bool(cfg.get('api_token')),zone=cfg.get('zone_name'),
                     tunnel_id=cfg.get('tunnel_id') or '',
-                    tunnel_configured=bool(cfg.get('tunnel_id')),suffix=SUFFIX,routes=routes)
+                    tunnel_configured=bool(cfg.get('tunnel_id')),suffix=SUFFIX,routes=routes,tunnel_links=links)
 
     def list_tunnels(self):
         """Account tunnel inventory for the settings UI. Soft-fails without raising."""
@@ -183,7 +188,9 @@ class Manager:
             raise ValueError('This tunnel is locally managed and cannot be edited from HomeScan.')
         response = api.call('GET', base + '/configurations') or {}
         config = response.get('config') or {'ingress':[{'service':'http_status:404'}]}
-        return dict(id=tunnel_id, name=tunnel.get('name') or '', config=config,
+        with storage.connect(self.db_path) as db:
+            links = [dict(r) for r in db.execute('SELECT * FROM cf_tunnel_links WHERE tunnel_id=?',(tunnel_id,))]
+        return dict(id=tunnel_id, name=tunnel.get('name') or '', config=config, links=links,
                     homescan=(tunnel_id == cfg.get('tunnel_id')))
 
     def update_tunnel(self, body):
@@ -212,6 +219,85 @@ class Manager:
             if current != desired:
                 api.call('PUT', base + '/configurations', {'config':desired})
         return self.get_tunnel(tunnel_id)
+
+    @staticmethod
+    def _rule_key(rule):
+        return str(rule.get('hostname') or ''), str(rule.get('path') or '')
+
+    @staticmethod
+    def _service_with_ip(service, ip):
+        parsed = urllib.parse.urlsplit(str(service or ''))
+        if parsed.scheme not in ('http','https','tcp','ssh','rdp','smb') or not parsed.hostname:
+            raise ValueError('Only URL-based HTTP, HTTPS, TCP, SSH, RDP, or SMB services can be linked.')
+        if parsed.username or parsed.password:
+            raise ValueError('Services containing credentials cannot be linked.')
+        try: port = parsed.port
+        except ValueError: raise ValueError('The linked service has an invalid port.') from None
+        netloc = ip + (f':{port}' if port is not None else '')
+        return urllib.parse.urlunsplit((parsed.scheme,netloc,parsed.path,parsed.query,parsed.fragment))
+
+    def save_tunnel_link(self, body):
+        action = str(body.get('action') or 'save')
+        if action == 'delete':
+            link_id = str(body.get('link_id') or '')
+            with self.lock, storage.connect(self.db_path) as db:
+                if db.execute('DELETE FROM cf_tunnel_links WHERE id=?',(link_id,)).rowcount != 1:
+                    raise ValueError('Tunnel link was not found.')
+            return dict(ok=True)
+        tunnel_id = self._tunnel_id(body.get('tunnel_id'))
+        did = str(body.get('device_id') or '')
+        key = (str(body.get('hostname') or ''),str(body.get('path') or ''))
+        with self.lock, storage.connect(self.db_path) as db:
+            device = db.execute('SELECT * FROM devices WHERE device_id=?',(did,)).fetchone()
+            if not device or not device['mac'] or not did.startswith('mac:'):
+                raise ValueError('Choose a computer with a known MAC address.')
+        detail = self.get_tunnel(tunnel_id)
+        matching = [r for r in detail['config'].get('ingress',[]) if self._rule_key(r)==key]
+        if len(matching) != 1: raise ValueError('Choose a unique tunnel ingress rule.')
+        private_ip(device['ip'])
+        self._service_with_ip(matching[0].get('service'),device['ip'])
+        if detail['homescan']:
+            with storage.connect(self.db_path) as db:
+                owned = db.execute("SELECT 1 FROM cf_resources WHERE kind='tunnel' AND hostname=?",(key[0],)).fetchone()
+            if owned: raise ValueError('This route already follows a computer through HomeScan device settings.')
+        with self.lock, storage.connect(self.db_path) as db:
+            old = db.execute('SELECT id FROM cf_tunnel_links WHERE tunnel_id=? AND hostname=? AND path=?',
+                             (tunnel_id,*key)).fetchone()
+            link_id = old['id'] if old else uuid.uuid4().hex
+            db.execute('''INSERT INTO cf_tunnel_links(id,tunnel_id,hostname,path,device_id,state,message)
+                VALUES(?,?,?,?,?,'pending','') ON CONFLICT(id) DO UPDATE SET
+                device_id=excluded.device_id,state='pending',message='',synced_ip=NULL''',
+                (link_id,tunnel_id,*key,did))
+        self.wake.set()
+        return dict(ok=True,id=link_id)
+
+    def _link_status(self, link, state, message='', ip=None):
+        with storage.connect(self.db_path) as db:
+            db.execute('UPDATE cf_tunnel_links SET state=?,message=?,synced_ip=?,last_checked=? WHERE id=?',
+                       (state,message,ip,storage.now(),link['id']))
+
+    def reconcile_tunnel_links(self, api, cfg, links, devices):
+        for tunnel_id in sorted({link['tunnel_id'] for link in links}):
+            group = [link for link in links if link['tunnel_id']==tunnel_id]
+            try:
+                path = f"/accounts/{cfg['account_id']}/cfd_tunnel/{tunnel_id}/configurations"
+                response = api.call('GET',path) or {};config=response.get('config') or {}
+                rules = config.get('ingress') or [];changed=False
+                for link in group:
+                    device=devices.get(link['device_id'])
+                    if not device or not device.get('address_current',False):
+                        self._link_status(link,'waiting','Waiting for this MAC to have a confirmed IP assignment.');continue
+                    matches=[r for r in rules if self._rule_key(r)==(link['hostname'],link['path'])]
+                    if len(matches)!=1:
+                        self._link_status(link,'error','The linked ingress rule is missing or no longer unique.');continue
+                    ip=private_ip(device['ip']);desired=self._service_with_ip(matches[0].get('service'),ip)
+                    if matches[0].get('service')!=desired: matches[0]['service']=desired;changed=True
+                    self._link_status(link,'synced','',ip)
+                if changed: api.call('PUT',path,{'config':dict(config,ingress=rules)})
+            except (CloudflareError,ValueError) as exc:
+                for link in group: self._link_status(link,'error',str(exc))
+            except Exception:
+                for link in group: self._link_status(link,'error','Tunnel link sync could not finish. Retrying automatically.')
 
     def save(self, body):
         did = str(body.get('device_id',''))
@@ -339,11 +425,16 @@ class Manager:
         with self.lock:
             with storage.connect(self.db_path) as db:
                 routes = [dict(r) for r in db.execute('SELECT * FROM cf_routes')]
-            if not routes: return
+                links = [dict(r) for r in db.execute('SELECT * FROM cf_tunnel_links')]
+            if not routes and not links: return
             try: cfg = self.config()
             except (OSError,ValueError): cfg = {}
             devices = {d['device_id']:d for d in storage.inventory(self.db_path)['devices']}
             api = self.api_factory(cfg['api_token']) if cfg.get('api_token') else None
+            if links:
+                if api: self.reconcile_tunnel_links(api,cfg,links,devices)
+                else:
+                    for link in links: self._link_status(link,'pending','Connect Cloudflare to sync this tunnel link.')
             for route in routes:
                 if not api:
                     self.status(route,'pending' if route['enabled'] or self.resources(route['id']) else 'disabled',
