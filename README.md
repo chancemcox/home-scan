@@ -14,10 +14,10 @@ The existing SQLite inventory is migrated automatically from IP keys to MAC keys
 
 Click **Configure** on a device with a known MAC address:
 
-- **Local DNS sync** creates a DNS-only A record, for example `nas.local.chancecox.com -> 192.168.2.20`. It resolves to the private IP and needs LAN/VPN connectivity. DNS does not specify a service port. Use `http://nas.local.chancecox.com:8080` if the service requires port 8080.
-- **Cloudflare Tunnel** publishes an HTTP or HTTPS service on a selectable origin port, for example `nas-web.local.chancecox.com -> http://192.168.2.20:8080`. The DNS record is a proxied CNAME to the dedicated HomeScan tunnel. When the IP changes, the tunnel's origin address changes; the CNAME remains pointed at the tunnel.
+- **Local DNS sync** creates a DNS-only A record, for example `nas.house.chancecox.com -> 192.168.2.20`. It resolves to the private IP and needs LAN/VPN connectivity. DNS does not specify a service port. Use `http://nas.house.chancecox.com:8080` if the service requires port 8080.
+- **Cloudflare Tunnel** publishes an HTTP or HTTPS service on a selectable origin port, for example `nas-web.house.chancecox.com -> http://192.168.2.20:8080`. The DNS record is a proxied CNAME to the dedicated HomeScan tunnel. When the IP changes, the tunnel's origin address changes; the CNAME remains pointed at the tunnel.
 - Both can be enabled with **different hostnames**. One hostname cannot simultaneously be a private A record and a tunnel CNAME.
-- Hostnames must be a single label below `local.chancecox.com`; enter a short label or the full hostname. A wildcard record is not created.
+- Hostnames must be a single label below `house.chancecox.com`; enter a short label or the full hostname. A wildcard record is not created.
 - Disabling a mode removes its HomeScan-managed DNS record and tunnel rule. Renaming removes the previous managed hostname. Unrelated DNS records or tunnel rules are not overwritten; conflicting hostnames show a descriptive error.
 
 After each complete scan, a background worker reads the actual Cloudflare records and tunnel config. It writes only when the destination or settings differ, so it also repairs manual drift in HomeScan-owned records. Failed updates retry automatically and do not block network scanning. **Sync now** queues an immediate reconciliation. Unknown/stale devices retain their last confirmed address; if another MAC is observed taking that IP, their published mappings are removed until their own MAC gets a confirmed address.
@@ -28,7 +28,7 @@ Settings can be saved before connecting Cloudflare; they remain pending. The das
 
 Create a Cloudflare API token with:
 
-- Zone / Zone / Read, scoped to `chancecox.com` (or a separately managed `local.chancecox.com` zone).
+- Zone / Zone / Read, scoped to `chancecox.com` (or a separately managed `house.chancecox.com` zone).
 - Zone / DNS / Edit for that zone.
 - Account / Cloudflare Tunnel / Edit for the zone's account, if using tunnels.
 
@@ -42,7 +42,7 @@ The script prompts privately for the token, discovers the zone and account IDs, 
 
 The API token is stored in `/data/cloudflare.json` with owner-only file permissions, not in the dashboard, Docker image, command-line arguments, or Git. The connector token is in the `homescan-tunnel` volume, mounted read-only by cloudflared. Protect volume backups because the data volume includes credentials. The dashboard is intended for a trusted LAN; write endpoints reject cross-origin browser requests, but it has no user login.
 
-The tunnel publishes the selected service to the Internet. Use the service's authentication or configure Cloudflare Access. For HTTPS names like `nas-web.local.chancecox.com`, a standard Universal SSL certificate on the `chancecox.com` zone does not cover that depth. Configure an appropriate edge certificate (for example Advanced Certificate Manager / Total TLS). No certificate purchases or account-plan changes are made by HomeScan. Local DNS-only HTTPS is handled by the local service's own certificate.
+The tunnel publishes the selected service to the Internet. Use the service's authentication or configure Cloudflare Access. For HTTPS names like `nas-web.house.chancecox.com`, a standard Universal SSL certificate on the `chancecox.com` zone does not cover that depth. Configure an appropriate edge certificate (for example Advanced Certificate Manager / Total TLS). No certificate purchases or account-plan changes are made by HomeScan. Local DNS-only HTTPS is handled by the local service's own certificate.
 
 Cloudflare references:
 - https://developers.cloudflare.com/tunnel/get-started/
@@ -62,13 +62,13 @@ Use `-Once` for a diagnostic scan. The existing task should normally be the only
 
 ### Deco
 
-The main Deco is an X10 at `192.168.86.233`, firmware 1.4.0. The read-only importer uses `tplink-deco-api==2.1.0`. Configure its owner password locally:
+The main Deco is an X10 at `192.168.86.233`, firmware 1.4.0. The read-only importer uses `tplink-deco-api==2.1.0`. Turn Deco support on or off and set the owner password from **Settings** in the dashboard, or locally:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\homeScan\configure-deco.ps1
 ```
 
-Credentials are saved in `.secrets/deco.json`, excluded from Git and the image, with the Windows folder restricted to the current user and SYSTEM. Online clients with usable IPv4 addresses are imported across any subnet. The reader tolerates complete JSON responses with a missing final HTTP chunk and rejects genuinely truncated JSON.
+Credentials are saved in `/data/deco.json` inside the app volume (owner-only permissions). Online clients with usable IPv4 addresses are imported across any subnet. Connection and authentication failures are skipped and never block network scanning or mark fresh network observations unavailable. The reader tolerates complete JSON responses with a missing final HTTP chunk and rejects genuinely truncated JSON.
 
 ## Linux all-in-one scanner
 

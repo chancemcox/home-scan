@@ -144,8 +144,10 @@ def device_states(devices, observations, scans, at=None):
         states = []
         for obs in observations:
             if obs.get('device_id',obs.get('ip')) != device.get('device_id',device.get('ip')): continue
-            success, attempt = good.get(obs['source']),latest.get(obs['source'])
-            if not fresh(success) or (attempt and attempt['error']): states.append('unknown')
+            # A failed source attempt must not wipe a still-fresh successful observation
+            # (Deco timeouts should not mark the whole inventory unavailable).
+            success = good.get(obs['source'])
+            if not fresh(success): states.append('unknown')
             elif obs['scan_id']==success['id']: states.append('seen')
             else: states.append('not_seen')
         device['status'] = 'seen' if 'seen' in states else 'unknown' if not states or 'unknown' in states else 'not_seen'

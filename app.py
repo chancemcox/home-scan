@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 import storage
 from storage import device_states
 from cloudflare_sync import Manager
+import deco
 from ws import Hub
 
 DB = os.getenv('DB_PATH', '/data/homescan.db')
@@ -20,7 +21,8 @@ def now(): return storage.now()
 def connect(): return storage.connect(DB)
 def devices_payload():
     result = storage.inventory(DB)
-    result.update(mode=MODE,network=NETWORK if MODE=='nmap' else 'Home network',cloudflare=CLOUDFLARE.public_state())
+    result.update(mode=MODE,network=NETWORK if MODE=='nmap' else 'Home network',
+                  cloudflare=CLOUDFLARE.public_state(),deco=deco.public_state())
     return json.dumps(result)
 
 def publish():
@@ -89,14 +91,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=='/ws': return HUB.serve(self, devices_payload)
         if self.path=='/health': return self.send(200,b'{"ok":true}')
         if self.path=='/api/cloudflare': return self.send(200,json.dumps(CLOUDFLARE.public_state()).encode())
+        if self.path=='/api/cloudflare/tunnels': return self.send(200,json.dumps(CLOUDFLARE.list_tunnels()).encode())
+        if self.path=='/api/deco': return self.send(200,json.dumps(deco.public_state()).encode())
         if self.path!='/api/devices': return self.send(404,b'{}')
         self.send(200,devices_payload().encode())
 
     def do_POST(self):
-        if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync'):
+        if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync','/api/deco/settings'):
             if not self.same_origin(): return self.send(403,b'{"error":"Use the HomeScan dashboard to change settings."}')
             try:
                 body = self.body()
+                if self.path=='/api/deco/settings':
+                    state = deco.save_settings(body)
+                    publish()
+                    return self.send(200,json.dumps(dict(ok=True,**state)).encode())
                 if self.path.endswith('/settings'): CLOUDFLARE.save(body)
                 else: CLOUDFLARE.wake.set()
                 publish()
@@ -111,7 +119,16 @@ class Handler(BaseHTTPRequestHandler):
             batches = body.get('sources')
             if batches is None: batches = [dict(source='network',hosts=body['hosts'],error=body.get('error'))]
             if not isinstance(batches,list) or not 1 <= len(batches) <= 8: raise ValueError('Invalid sources')
-            storage.record_batches(DB,batches)
+            # Drop deco batches that are empty+error so an unreachable router cannot
+            # poison inventory freshness; network batches still apply.
+            cleaned = []
+            for batch in batches:
+                if not isinstance(batch, dict): raise ValueError('Invalid sources')
+                if batch.get('source')=='deco' and batch.get('error') and not batch.get('hosts'):
+                    continue
+                cleaned.append(batch)
+            if not cleaned: raise ValueError('Invalid sources')
+            storage.record_batches(DB,cleaned)
             CLOUDFLARE.wake.set()
             publish()
         except (ValueError,KeyError,TypeError) as exc:

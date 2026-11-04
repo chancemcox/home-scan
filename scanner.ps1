@@ -51,27 +51,31 @@ while ($true) {
         $networkHosts = @($hostsFound)
         $deco = $null
 
+        # Deco is optional. Timeouts, auth failures, and disabled support must not
+        # prevent the network scan from being recorded.
         try {
             $raw = & docker compose --project-directory $PSScriptRoot exec -T homescan python deco.py 2>$null
             if ($LASTEXITCODE -ne 0) { throw 'Deco helper unavailable' }
             $deco = ($raw -join "`n") | ConvertFrom-Json
-
-            $merged = @{}
-            foreach ($hostEntry in $hostsFound) { $merged[$hostEntry.ip] = $hostEntry }
-            foreach ($client in $deco.hosts) {
-                $existing = $merged[$client.ip]
-                $merged[$client.ip] = @{
-                    ip = $client.ip
-                    hostname = $(if ($client.hostname) { $client.hostname } elseif ($existing) { $existing.hostname } else { '' })
-                    mac = $(if ($client.mac) { $client.mac } elseif ($existing) { $existing.mac } else { '' })
+            if ($deco.enabled -and $deco.available) {
+                $merged = @{}
+                foreach ($hostEntry in $hostsFound) { $merged[$hostEntry.ip] = $hostEntry }
+                foreach ($client in @($deco.hosts)) {
+                    if ($null -eq $client -or -not $client.ip) { continue }
+                    $existing = $merged[$client.ip]
+                    $merged[$client.ip] = @{
+                        ip = $client.ip
+                        hostname = $(if ($client.hostname) { $client.hostname } elseif ($existing) { $existing.hostname } else { '' })
+                        mac = $(if ($client.mac) { $client.mac } elseif ($existing) { $existing.mac } else { '' })
+                    }
                 }
+                $hostsFound = @($merged.Values)
             }
-            $hostsFound = @($merged.Values)
         } catch { $deco = $null }
 
         $sources = @(@{source='network';hosts=@($networkHosts);error=$scanError})
-        if ($deco.available) {
-            $sources += @{source='deco';hosts=@($deco.hosts | Where-Object { $null -ne $_ });error=$null}
+        if ($deco -and $deco.enabled -and $deco.available) {
+            $sources += @{source='deco';hosts=@($deco.hosts | Where-Object { $_ -and $_.ip });error=$null}
         }
         $payload = @{hosts=@($hostsFound);sources=@($sources);error=$scanError;warning=$null} | ConvertTo-Json -Depth 4 -Compress
         Invoke-RestMethod -Method Post -Uri "$Server/api/scan" -Headers @{Authorization="Bearer $Token"} -ContentType 'application/json' -Body $payload -TimeoutSec 10 | Out-Null

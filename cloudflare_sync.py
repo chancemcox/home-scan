@@ -12,7 +12,8 @@ import uuid
 from pathlib import Path
 import storage
 
-SUFFIX = 'local.chancecox.com'
+SUFFIX = 'house.chancecox.com'
+OLD_SUFFIX = 'local.chancecox.com'
 CONFIG = Path(os.getenv('CLOUDFLARE_CONFIG','/data/cloudflare.json'))
 TOKEN_FILE = Path(os.getenv('CLOUDFLARE_TUNNEL_TOKEN','/run/homescan-tunnel/token'))
 
@@ -82,6 +83,14 @@ class Manager:
             CREATE TABLE IF NOT EXISTS cf_resources(route_id TEXT, hostname TEXT, kind TEXT, record_id TEXT,
                 PRIMARY KEY(route_id,hostname));
             ''')
+            # Rewrite managed hostnames after the global suffix change; leave cf_resources
+            # on the old names so reconcile deletes prior DNS/tunnel ownership.
+            for row in db.execute('SELECT id,hostname,enabled FROM cf_routes WHERE hostname LIKE ?',
+                                  ('%.'+OLD_SUFFIX,)):
+                new = row['hostname'].removesuffix('.'+OLD_SUFFIX)+'.'+SUFFIX
+                db.execute('''UPDATE cf_routes SET hostname=?,
+                    state=CASE WHEN enabled=1 THEN 'pending' ELSE state END, message='' WHERE id=?''',
+                           (new, row['id']))
 
     def config(self):
         try: return json.loads(self.config_path.read_text())
@@ -93,7 +102,36 @@ class Manager:
         with storage.connect(self.db_path) as db:
             routes = [dict(r) for r in db.execute('SELECT * FROM cf_routes')]
         return dict(configured=bool(cfg.get('api_token')),zone=cfg.get('zone_name'),
+                    tunnel_id=cfg.get('tunnel_id') or '',
                     tunnel_configured=bool(cfg.get('tunnel_id')),suffix=SUFFIX,routes=routes)
+
+    def list_tunnels(self):
+        """Account tunnel inventory for the settings UI. Soft-fails without raising."""
+        try: cfg = self.config()
+        except (ValueError, OSError): cfg = {}
+        if not cfg.get('api_token') or not cfg.get('account_id'):
+            return dict(configured=False, tunnels=[], error='Connect Cloudflare to list tunnels.')
+        try:
+            api = self.api_factory(cfg['api_token'])
+            rows = api.call('GET', f"/accounts/{cfg['account_id']}/cfd_tunnel?" +
+                            urllib.parse.urlencode({'is_deleted': 'false', 'per_page': 100})) or []
+        except CloudflareError as exc:
+            return dict(configured=True, tunnels=[], error=str(exc))
+        except Exception:
+            return dict(configured=True, tunnels=[], error='Could not load Cloudflare tunnels.')
+        tunnels = []
+        for row in rows:
+            connections = row.get('connections') or []
+            tunnels.append(dict(
+                id=row.get('id') or '',
+                name=row.get('name') or '',
+                status=row.get('status') or ('healthy' if connections else 'inactive'),
+                created_at=row.get('created_at') or '',
+                connections=len(connections),
+                homescan=(row.get('id') == cfg.get('tunnel_id')),
+            ))
+        tunnels.sort(key=lambda t: (not t['homescan'], t['name'].lower()))
+        return dict(configured=True, tunnels=tunnels, error='')
 
     def save(self, body):
         did = str(body.get('device_id',''))

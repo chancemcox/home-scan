@@ -1,6 +1,6 @@
 param([switch]$LocalDnsOnly)
 $ErrorActionPreference = 'Stop'
-Write-Host 'Cloudflare setup for *.local.chancecox.com'
+Write-Host 'Cloudflare setup for *.house.chancecox.com'
 Write-Host 'Token permissions: Zone Read, DNS Edit; plus Cloudflare Tunnel Edit for tunnels.'
 $secure = Read-Host 'Cloudflare API token (hidden)' -AsSecureString
 $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
@@ -21,4 +21,4 @@ if ($result.tunnel_configured) {
     if ($LASTEXITCODE -ne 0) { throw 'Cloudflare is configured, but the tunnel connector could not start.' }
 }
 Write-Host "Connected to $($result.zone). Saved routes will sync automatically within a minute."
-Write-Host 'Tunnel HTTPS for *.local.chancecox.com requires matching Cloudflare certificate coverage.'
+Write-Host 'Tunnel HTTPS for *.house.chancecox.com requires matching Cloudflare certificate coverage.'

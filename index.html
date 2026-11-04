@@ -2,18 +2,23 @@
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HomeScan · Network inventory</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body><main>
-<header><div><small class="eyebrow">HOME NETWORK / DEVICE INVENTORY</small><h1>HomeScan<span class="brand-dot">.</span></h1><p>Your devices. The right address, every time.</p></div><div class="header-actions"><span id="status" class="pill">Connecting…</span><a id="cloudflare-login" class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in to Cloudflare ↗</a><button id="connection-button">Cloudflare setup</button></div></header>
+<header><div><small class="eyebrow">HOME NETWORK / DEVICE INVENTORY</small><h1>HomeScan<span class="brand-dot">.</span></h1><p>Your devices. The right address, every time.</p></div><div class="header-actions"><span id="status" class="pill">Connecting…</span><button id="settings-button">Settings</button><a id="cloudflare-login" class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in to Cloudflare ↗</a><button id="connection-button">Cloudflare setup</button></div></header>
 <div class="stats"><div class="card"><span>Devices recorded</span><b id="total">—</b></div><div class="card"><span>Confirmed seen</span><b id="online">—</b></div><div class="card"><span>Cloudflare routes</span><b id="route-count">—</b></div></div>
-<div class="connection-line"><span id="cloud-state">Cloudflare: checking…</span><button id="sync-button" class="text-button">Sync now ↻</button></div>
+<div class="connection-line"><span id="cloud-state">Cloudflare: checking…</span><span id="deco-state">Deco: checking…</span><button id="sync-button" class="text-button">Sync now ↻</button></div>
 <p id="notice" role="status"></p>
+<section class="panel" id="tunnels-panel" aria-labelledby="tunnels-heading">
+<div class="panel-head"><div><h2 id="tunnels-heading">Cloudflare tunnels</h2><p class="panel-copy">Account tunnels visible to the HomeScan API token. The HomeScan-managed tunnel is marked.</p></div><button id="tunnels-refresh" type="button" class="text-button">Refresh ↻</button></div>
+<p id="tunnels-meta" class="filter-meta" aria-live="polite"></p>
+<div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Connections</th><th>Created</th><th>ID</th></tr></thead><tbody id="tunnel-rows"><tr><td colspan="5">Connect Cloudflare, then refresh to load tunnels.</td></tr></tbody></table></div>
+</section>
 <div class="toolbar"><h2>Device inventory</h2><div class="filters"><label class="filter"><span class="sr-only">Status</span><select id="filter-status" aria-label="Filter by status"><option value="">All statuses</option><option value="seen">Seen</option><option value="not_seen">Not seen</option><option value="unknown">Unavailable</option></select></label><label class="filter"><span class="sr-only">Cloudflare</span><select id="filter-cloudflare" aria-label="Filter by Cloudflare"><option value="">All Cloudflare</option><option value="enabled">Routes enabled</option><option value="disabled">Not enabled</option><option value="attention">Needs attention</option></select></label><input id="search" type="search" placeholder="Search name, IP, MAC, or URL…" aria-label="Search devices"></div></div>
 <p id="filter-meta" class="filter-meta" aria-live="polite"></p>
 <section class="table-wrap"><table><thead><tr><th><button type="button" class="sort" data-sort="hostname" aria-label="Sort by device">Device</button></th><th><button type="button" class="sort" data-sort="ip" aria-label="Sort by IP address">IP address</button></th><th><button type="button" class="sort" data-sort="status" aria-label="Sort by status">Status</button></th><th><button type="button" class="sort" data-sort="cloudflare" aria-label="Sort by Cloudflare">Cloudflare</button></th><th><button type="button" class="sort" data-sort="last_seen" aria-label="Sort by last seen">Last seen</button></th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="rows"></tbody></table></section>
 <footer><span id="meta"></span><p>Devices are identified by MAC address. IP-only discoveries need a MAC before Cloudflare sync can be enabled.</p></footer>
 </main>
 <dialog id="device-dialog"><form id="device-form"><div class="dialog-head"><div><small class="eyebrow">DEVICE SETTINGS</small><h2 id="device-title">Cloudflare sync</h2></div><button type="button" class="close" data-close="device-dialog" aria-label="Close device settings">×</button></div><p id="device-identity" class="mono"></p><p id="device-current"></p>
-<fieldset><legend><label class="toggle"><input id="local-enabled" type="checkbox">Local DNS sync</label></legend><p>Resolve this hostname directly to the device’s private LAN IP.</p><label for="local-host">Hostname</label><div class="hostname-input"><input id="local-host" placeholder="nas" autocomplete="off"><span>.local.chancecox.com</span></div><small>DNS only. Reachable from your home network or VPN. DNS does not select a port.</small></fieldset>
-<fieldset><legend><label class="toggle"><input id="tunnel-enabled" type="checkbox">Cloudflare Tunnel</label></legend><p>Publish this web service through a Cloudflare tunnel.</p><label for="tunnel-host">Hostname</label><div class="hostname-input"><input id="tunnel-host" placeholder="nas-web" autocomplete="off"><span>.local.chancecox.com</span></div><div class="split"><div><label for="tunnel-protocol">Service protocol</label><select id="tunnel-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div><div><label for="tunnel-port">Service port</label><input id="tunnel-port" type="number" min="1" max="65535" value="80"></div></div><small>The tunnel makes this service reachable from the Internet. Use the service’s login or a Cloudflare Access policy. HTTPS for *.local.chancecox.com needs matching Cloudflare certificate coverage.</small></fieldset>
+<fieldset><legend><label class="toggle"><input id="local-enabled" type="checkbox">Local DNS sync</label></legend><p>Resolve this hostname directly to the device’s private LAN IP.</p><label for="local-host">Hostname</label><div class="hostname-input"><input id="local-host" placeholder="nas" autocomplete="off"><span>.house.chancecox.com</span></div><small>DNS only. Reachable from your home network or VPN. DNS does not select a port.</small></fieldset>
+<fieldset><legend><label class="toggle"><input id="tunnel-enabled" type="checkbox">Cloudflare Tunnel</label></legend><p>Publish this web service through a Cloudflare tunnel.</p><label for="tunnel-host">Hostname</label><div class="hostname-input"><input id="tunnel-host" placeholder="nas-web" autocomplete="off"><span>.house.chancecox.com</span></div><div class="split"><div><label for="tunnel-protocol">Service protocol</label><select id="tunnel-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div><div><label for="tunnel-port">Service port</label><input id="tunnel-port" type="number" min="1" max="65535" value="80"></div></div><small>The tunnel makes this service reachable from the Internet. Use the service’s login or a Cloudflare Access policy. HTTPS for *.house.chancecox.com needs matching Cloudflare certificate coverage.</small></fieldset>
 <p class="hint">Both modes can be enabled using different hostnames. Turning a mode off removes its HomeScan-managed DNS record and tunnel route.</p><p id="form-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" data-close="device-dialog">Cancel</button><button id="save-button" class="primary" type="submit">Save settings</button></div></form></dialog>
 <dialog id="connection-dialog">
 <div class="dialog-head"><h2>Connect Cloudflare</h2><button class="close" data-close="connection-dialog" aria-label="Close Cloudflare setup">×</button></div>
@@ -27,8 +32,27 @@
 <p>Run this command on the HomeScan PC and paste the token into its hidden prompt. It connects the account and starts a dedicated HomeScan tunnel.</p>
 <pre>powershell -NoProfile -ExecutionPolicy Bypass -File C:\homeScan\configure-cloudflare.ps1</pre>
 <p>Use <code>-LocalDnsOnly</code> with the command if you only want local DNS. Settings can be saved before connecting; they’ll be applied when credentials are ready.</p>
-<p>For tunnel URLs below local.chancecox.com, configure a certificate covering <strong>*.local.chancecox.com</strong>, for example with Advanced Certificate Manager / Total TLS.</p>
+<p>For tunnel URLs below house.chancecox.com, configure a certificate covering <strong>*.house.chancecox.com</strong>, for example with Advanced Certificate Manager / Total TLS.</p>
 <p><a href="https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/" target="_blank" rel="noopener noreferrer">Cloudflare certificate coverage ↗</a></p>
 <div class="dialog-actions"><button data-close="connection-dialog">Done</button></div>
+</dialog>
+<dialog id="settings-dialog">
+<form id="settings-form">
+<div class="dialog-head"><div><small class="eyebrow">HOME SCAN</small><h2>Settings</h2></div><button type="button" class="close" data-close="settings-dialog" aria-label="Close settings">×</button></div>
+<p>Configure optional Deco mesh inventory. When Deco is unreachable or turned off, network scanning continues normally.</p>
+<fieldset>
+<legend><label class="toggle"><input id="deco-enabled" type="checkbox">Deco support</label></legend>
+<p>Import online clients from the TP-Link Deco owner account. Connection failures are skipped and never block LAN scanning.</p>
+<label for="deco-host">Deco address</label>
+<input id="deco-host" placeholder="192.168.86.233" autocomplete="off">
+<label for="deco-username">Username</label>
+<input id="deco-username" value="admin" autocomplete="username">
+<label for="deco-password">Owner password</label>
+<input id="deco-password" type="password" placeholder="Leave blank to keep the saved password" autocomplete="current-password">
+<small id="deco-password-hint">Password is stored only on this HomeScan host.</small>
+</fieldset>
+<p id="settings-error" class="error" role="alert"></p>
+<div class="dialog-actions"><button type="button" data-close="settings-dialog">Cancel</button><button id="settings-save" class="primary" type="submit">Save settings</button></div>
+</form>
 </dialog>
 </body></html>

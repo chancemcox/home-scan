@@ -68,7 +68,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(next(r for r in records if r['type']=='A')['content'],'192.168.1.80')
         self.assertFalse(next(r for r in records if r['type']=='A')['proxied'])
         self.assertEqual(next(r for r in records if r['type']=='CNAME')['content'],'tunnel.cfargotunnel.com')
-        self.assertEqual(next(r for r in self.api.config['ingress'] if r.get('hostname')=='nas-web.local.chancecox.com')['service'],'http://192.168.1.80:8080')
+        self.assertEqual(next(r for r in self.api.config['ingress'] if r.get('hostname')=='nas-web.house.chancecox.com')['service'],'http://192.168.1.80:8080')
         devices=storage.inventory(self.db)['devices'];self.assertEqual(len(devices),1)
         self.assertEqual(devices[0]['device_id'],self.did)
         self.assertEqual(len(self.m.public_state()['routes']),2)
@@ -85,13 +85,13 @@ class IntegrationTests(unittest.TestCase):
         self.m.sync_once();r=next(iter(self.api.records.values()))
         self.assertEqual(r['content'],'192.168.2.5');self.assertFalse(r['proxied'])
     def test_foreign_dns_is_not_overwritten(self):
-        self.api.records['foreign']=dict(id='foreign',name='nas.local.chancecox.com',type='A',content='10.0.0.5')
+        self.api.records['foreign']=dict(id='foreign',name='nas.house.chancecox.com',type='A',content='10.0.0.5')
         self.save(tunnel=False);self.m.sync_once()
         self.assertEqual(self.api.writes,[])
         self.assertEqual(next(r for r in self.m.public_state()['routes'] if r['kind']=='local')['state'],'error')
     def test_rename_disable_preserve_unrelated_ingress(self):
         self.save();self.m.sync_once();self.save(localname='storage',tunnelname='storage-web');self.m.sync_once()
-        self.assertEqual({r['name'] for r in self.api.records.values()},{'storage.local.chancecox.com','storage-web.local.chancecox.com'})
+        self.assertEqual({r['name'] for r in self.api.records.values()},{'storage.house.chancecox.com','storage-web.house.chancecox.com'})
         self.save(False,False);self.m.sync_once()
         self.assertEqual(self.api.records,{})
         self.assertEqual(self.api.config['ingress'],[{'hostname':'unrelated.chancecox.com','service':'http://10.0.0.9:8000'},{'service':'http_status:404'}])
@@ -104,7 +104,7 @@ class IntegrationTests(unittest.TestCase):
     def test_partial_tunnel_creation_recovers(self):
         self.save(local=False);self.api.fail_dns_once=True;self.m.sync_once();self.m.sync_once()
         self.assertEqual(len(self.api.records),1)
-        self.assertEqual(len([r for r in self.api.config['ingress'] if r.get('hostname')=='nas-web.local.chancecox.com']),1)
+        self.assertEqual(len([r for r in self.api.config['ingress'] if r.get('hostname')=='nas-web.house.chancecox.com']),1)
     def test_deco_skip_keeps_timestamps_and_target(self):
         self.see('192.168.86.20',source='deco');self.save();self.m.sync_once()
         prior=storage.inventory(self.db)['devices'][0]['last_seen']
@@ -115,7 +115,7 @@ class IntegrationTests(unittest.TestCase):
     def test_no_token_exposed(self):
         self.assertNotIn('test-secret',json.dumps(self.m.public_state()))
     def test_validation_and_hostname_collision(self):
-        for value in ('*.local.chancecox.com','nas.evil.com','a.b.local.chancecox.com','https://nas.local.chancecox.com/path'):
+        for value in ('*.house.chancecox.com','nas.evil.com','a.b.house.chancecox.com','https://nas.house.chancecox.com/path'):
             with self.assertRaises(ValueError): hostname(value)
         with self.assertRaises(ValueError): self.save(localname='same',tunnelname='same')
         with self.assertRaises(ValueError): self.save(port=65536)
