@@ -1,0 +1,299 @@
+"""MAC-bound DNS and HTTP tunnel reconciliation. Only tagged records are managed."""
+import ipaddress
+import json
+import os
+import re
+import sys
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from pathlib import Path
+import storage
+
+SUFFIX = 'local.chancecox.com'
+CONFIG = Path(os.getenv('CLOUDFLARE_CONFIG','/data/cloudflare.json'))
+TOKEN_FILE = Path(os.getenv('CLOUDFLARE_TUNNEL_TOKEN','/run/homescan-tunnel/token'))
+
+
+class CloudflareError(Exception):
+    pass
+
+
+class API:
+    def __init__(self, token): self.token = token
+
+    def call(self, method, path, body=None):
+        req = urllib.request.Request('https://api.cloudflare.com/client/v4'+path,
+            data=json.dumps(body).encode() if body is not None else None, method=method,
+            headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=12) as response:
+                result = json.load(response)
+        except urllib.error.HTTPError as exc:
+            # Never include request headers, tokens, or raw upstream responses.
+            raise CloudflareError(f'Cloudflare HTTP {exc.code}. Check token permissions or retry later.') from None
+        except (OSError,ValueError):
+            raise CloudflareError('Cloudflare could not be reached. Retrying automatically.') from None
+        if not result.get('success'):
+            codes = ', '.join(str(e.get('code','unknown')) for e in result.get('errors',[]))
+            raise CloudflareError('Cloudflare rejected the request (code '+codes+').')
+        return result.get('result')
+
+
+def hostname(value):
+    name = str(value or '').strip().lower().rstrip('.')
+    if '://' in name:
+        parsed = urllib.parse.urlsplit(name)
+        if parsed.scheme not in ('http','https') or parsed.path not in ('','/') or parsed.query or parsed.fragment or parsed.port or parsed.username:
+            raise ValueError('Enter a hostname without a port or path.')
+        name = parsed.hostname or ''
+    if '.' not in name: name += '.'+SUFFIX
+    label = name.removesuffix('.'+SUFFIX)
+    if name != label+'.'+SUFFIX or not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',label):
+        raise ValueError('Use a single hostname such as nas.'+SUFFIX)
+    return name
+
+
+def private_ip(value):
+    ip = ipaddress.IPv4Address(value)
+    if not any(ip in ipaddress.IPv4Network(n) for n in ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16')):
+        raise ValueError('Cloudflare targets must be private LAN IPv4 addresses.')
+    return str(ip)
+
+
+class Manager:
+    def __init__(self, db_path, config_path=CONFIG, api_factory=API):
+        self.db_path, self.config_path, self.api_factory = db_path,Path(config_path),api_factory
+        self.lock = threading.RLock()
+        self.wake = threading.Event()
+
+    def init(self):
+        with storage.connect(self.db_path) as db:
+            db.executescript('''
+            CREATE TABLE IF NOT EXISTS cf_routes(id TEXT PRIMARY KEY, device_id TEXT NOT NULL,
+                kind TEXT NOT NULL, hostname TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
+                protocol TEXT NOT NULL DEFAULT 'http', port INTEGER NOT NULL DEFAULT 80,
+                state TEXT NOT NULL DEFAULT 'disabled', message TEXT NOT NULL DEFAULT '',
+                synced_ip TEXT, last_checked TEXT, UNIQUE(device_id,kind));
+            CREATE UNIQUE INDEX IF NOT EXISTS cf_hostname ON cf_routes(hostname) WHERE enabled=1;
+            CREATE TABLE IF NOT EXISTS cf_resources(route_id TEXT, hostname TEXT, kind TEXT, record_id TEXT,
+                PRIMARY KEY(route_id,hostname));
+            ''')
+
+    def config(self):
+        try: return json.loads(self.config_path.read_text())
+        except FileNotFoundError: return {}
+
+    def public_state(self):
+        try: cfg = self.config()
+        except (ValueError,OSError): cfg = {}
+        with storage.connect(self.db_path) as db:
+            routes = [dict(r) for r in db.execute('SELECT * FROM cf_routes')]
+        return dict(configured=bool(cfg.get('api_token')),zone=cfg.get('zone_name'),
+                    tunnel_configured=bool(cfg.get('tunnel_id')),suffix=SUFFIX,routes=routes)
+
+    def save(self, body):
+        did = str(body.get('device_id',''))
+        with self.lock, storage.connect(self.db_path) as db:
+            device = db.execute('SELECT * FROM devices WHERE device_id=?',(did,)).fetchone()
+            if not device or not device['mac'] or not did.startswith('mac:'):
+                raise ValueError('A known MAC address is required for Cloudflare sync.')
+            planned = []
+            for kind in ('local','tunnel'):
+                item = body.get(kind,{})
+                if not isinstance(item,dict) or not isinstance(item.get('enabled',False),bool):
+                    raise ValueError('Invalid Cloudflare settings.')
+                enabled = item.get('enabled',False)
+                old = db.execute('SELECT * FROM cf_routes WHERE device_id=? AND kind=?',(did,kind)).fetchone()
+                name = hostname(item.get('hostname')) if enabled else (old['hostname'] if old else '')
+                protocol = item.get('protocol','http')
+                if protocol not in ('http','https'): raise ValueError('Choose HTTP or HTTPS for the origin.')
+                try: port = int(item.get('port',80))
+                except (ValueError,TypeError): raise ValueError('Port must be between 1 and 65535.')
+                if not 1 <= port <= 65535: raise ValueError('Port must be between 1 and 65535.')
+                if enabled: private_ip(device['ip'])
+                planned.append((old['id'] if old else uuid.uuid4().hex,did,kind,name,int(enabled),protocol,port))
+            names = [p[3] for p in planned if p[4]]
+            if len(set(names)) != len(names):
+                raise ValueError('Local DNS and a tunnel need different hostnames.')
+            for name in names:
+                if db.execute('SELECT 1 FROM cf_routes WHERE hostname=? AND enabled=1 AND device_id<>?',(name,did)).fetchone():
+                    raise ValueError('That hostname is already assigned to another device.')
+            # Release unique hostname reservations before applying both settings.
+            db.execute('UPDATE cf_routes SET enabled=0 WHERE device_id=?',(did,))
+            for values in planned:
+                db.execute('''INSERT INTO cf_routes(id,device_id,kind,hostname,enabled,protocol,port,state)
+                    VALUES(?,?,?,?,?,?,?,'pending') ON CONFLICT(id) DO UPDATE SET
+                    hostname=excluded.hostname,enabled=excluded.enabled,protocol=excluded.protocol,
+                    port=excluded.port,state='pending',message='' ''',values)
+        self.wake.set()
+
+    def status(self, route, state, message='', ip=None):
+        with storage.connect(self.db_path) as db:
+            db.execute('UPDATE cf_routes SET state=?,message=?,synced_ip=?,last_checked=? WHERE id=?',
+                       (state,message,ip,storage.now(),route['id']))
+
+    def resources(self, rid):
+        with storage.connect(self.db_path) as db:
+            return [dict(r) for r in db.execute('SELECT * FROM cf_resources WHERE route_id=?',(rid,))]
+
+    def dns_records(self, api, cfg, name):
+        return api.call('GET',f"/zones/{cfg['zone_id']}/dns_records?"+urllib.parse.urlencode({'name':name,'per_page':100})) or []
+
+    def tunnel_rule(self, api, cfg, name, service, route_id=None):
+        if not cfg.get('tunnel_id'): raise CloudflareError('Run Cloudflare setup with tunnel support enabled.')
+        path = f"/accounts/{cfg['account_id']}/cfd_tunnel/{cfg['tunnel_id']}/configurations"
+        response = api.call('GET',path) or {}
+        config = response.get('config') or {'ingress':[{'service':'http_status:404'}]}
+        rules = config.get('ingress') or [{'service':'http_status:404'}]
+        with storage.connect(self.db_path) as db:
+            owned = db.execute('SELECT 1 FROM cf_resources WHERE hostname=? AND kind=?',(name,'tunnel')).fetchone()
+        matching = [r for r in rules if r.get('hostname')==name]
+        if matching and not owned:
+            raise CloudflareError('A tunnel rule already uses this hostname outside HomeScan.')
+        if route_id:
+            with storage.connect(self.db_path) as db:
+                db.execute('INSERT OR IGNORE INTO cf_resources VALUES(?,?,?,NULL)',(route_id,name,'tunnel'))
+        if service is None:
+            desired = [r for r in rules if r.get('hostname')!=name]
+        elif matching:
+            desired = [dict(r,service=service) if r.get('hostname')==name else r for r in rules]
+        else:
+            desired = list(rules)
+            # An ingress catch-all must remain last; preserve unrelated rules.
+            position = next((i for i,r in enumerate(desired) if not r.get('hostname') and not r.get('path')),len(desired))
+            desired.insert(position,{'hostname':name,'service':service})
+        if not desired or desired[-1].get('hostname') or desired[-1].get('path'):
+            desired.append({'service':'http_status:404'})
+        if desired != rules:
+            api.call('PUT',path,{'config':dict(config,ingress=desired)})
+
+    def cleanup(self, api, cfg, resource):
+        name,rid = resource['hostname'],resource['route_id']
+        for record in self.dns_records(api,cfg,name):
+            if record.get('comment')=='homescan:'+rid:
+                api.call('DELETE',f"/zones/{cfg['zone_id']}/dns_records/{record['id']}")
+        if resource['kind']=='tunnel': self.tunnel_rule(api,cfg,name,None)
+        with storage.connect(self.db_path) as db:
+            db.execute('DELETE FROM cf_resources WHERE route_id=? AND hostname=?',(rid,name))
+
+    def reconcile(self, api, cfg, route, device):
+        resources = self.resources(route['id'])
+        if not route['enabled']:
+            for resource in resources: self.cleanup(api,cfg,resource)
+            self.status(route,'disabled')
+            return
+        if not device or not device.get('address_current',False):
+            for resource in resources: self.cleanup(api,cfg,resource)
+            self.status(route,'waiting','Waiting for this MAC to have a confirmed IP assignment.')
+            return
+        ip = private_ip(device['ip'])
+        name = route['hostname']
+        for resource in resources:
+            if resource['hostname']!=name or resource['kind']!=route['kind']:
+                self.cleanup(api,cfg,resource)
+        matches = self.dns_records(api,cfg,name)
+        if any(r.get('comment')!='homescan:'+route['id'] for r in matches) or len(matches)>1:
+            raise CloudflareError('An existing DNS record owns this hostname. Choose another name or remove that record yourself.')
+        if route['kind']=='local':
+            desired = dict(type='A',name=name,content=ip,proxied=False,ttl=60,comment='homescan:'+route['id'])
+        else:
+            service = f"{route['protocol']}://{ip}:{route['port']}"
+            self.tunnel_rule(api,cfg,name,service,route['id'])
+            desired = dict(type='CNAME',name=name,content=cfg['tunnel_id']+'.cfargotunnel.com',proxied=True,ttl=1,comment='homescan:'+route['id'])
+        # Persist ingress ownership before DNS writes so retries can recover partial success.
+        with storage.connect(self.db_path) as db:
+            db.execute('INSERT OR IGNORE INTO cf_resources VALUES(?,?,?,NULL)',(route['id'],name,route['kind']))
+        record = matches[0] if matches else None
+        if record:
+            if any(record.get(k)!=v for k,v in desired.items()):
+                record = api.call('PUT',f"/zones/{cfg['zone_id']}/dns_records/{record['id']}",desired)
+        else:
+            record = api.call('POST',f"/zones/{cfg['zone_id']}/dns_records",desired)
+        with storage.connect(self.db_path) as db:
+            db.execute('UPDATE cf_resources SET record_id=? WHERE route_id=? AND hostname=?',(record['id'],route['id'],name))
+        self.status(route,'synced','',ip)
+
+    def sync_once(self):
+        with self.lock:
+            with storage.connect(self.db_path) as db:
+                routes = [dict(r) for r in db.execute('SELECT * FROM cf_routes')]
+            if not routes: return
+            try: cfg = self.config()
+            except (OSError,ValueError): cfg = {}
+            devices = {d['device_id']:d for d in storage.inventory(self.db_path)['devices']}
+            api = self.api_factory(cfg['api_token']) if cfg.get('api_token') else None
+            for route in routes:
+                if not api:
+                    self.status(route,'pending' if route['enabled'] or self.resources(route['id']) else 'disabled',
+                                'Connect Cloudflare to apply these settings.' if route['enabled'] else '')
+                    continue
+                try: self.reconcile(api,cfg,route,devices.get(route['device_id']))
+                except (CloudflareError,ValueError) as exc: self.status(route,'error',str(exc))
+                except Exception: self.status(route,'error','Sync could not finish. Retrying automatically.')
+
+    def run(self):
+        while True:
+            self.wake.wait(60)
+            self.wake.clear()
+            try: self.sync_once()
+            except Exception: pass  # Cloudflare outages must not stop local inventory.
+
+
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(value))
+    tmp.chmod(0o600)
+    tmp.replace(path)
+
+
+def setup(options):
+    """Only invoked interactively with the token supplied through stdin."""
+    token = str(options.get('api_token','')).strip()
+    if len(token)<20: raise ValueError('Enter a Cloudflare API token.')
+    api = API(token)
+    old = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+    zone = None
+    for name in (SUFFIX,'chancecox.com'):
+        zones = api.call('GET','/zones?'+urllib.parse.urlencode({'name':name,'status':'active'})) or []
+        if zones:
+            zone = zones[0]
+            break
+    if not zone: raise CloudflareError('The token cannot access an active chancecox.com zone. Grant Zone Read and DNS Edit.')
+    if old.get('zone_id') and old['zone_id']!=zone['id']:
+        raise CloudflareError('Zone changed. Keep the original zone while HomeScan manages existing records.')
+    cfg = dict(old,api_token=token,zone_id=zone['id'],zone_name=zone['name'],account_id=zone['account']['id'])
+    # Store the installation identity before creating anything, so setup retries reuse its tunnel.
+    cfg.setdefault('installation_id',uuid.uuid4().hex)
+    atomic_json(CONFIG,cfg)
+    if options.get('tunnel',True):
+        base = f"/accounts/{cfg['account_id']}/cfd_tunnel"
+        if not cfg.get('tunnel_id'):
+            name = 'homescan-'+cfg['installation_id'][:12]
+            existing = api.call('GET',base+'?'+urllib.parse.urlencode({'name':name,'is_deleted':'false'})) or []
+            exact = [t for t in existing if t.get('name')==name]
+            tunnel = exact[0] if exact else api.call('POST',base,{'name':name,'config_src':'cloudflare'})
+            cfg['tunnel_id'] = tunnel['id']
+            atomic_json(CONFIG,cfg)
+            if not exact:
+                api.call('PUT',base+'/'+tunnel['id']+'/configurations',{'config':{'ingress':[{'service':'http_status:404'}]}})
+        tunnel_token = api.call('GET',base+'/'+cfg['tunnel_id']+'/token')
+        TOKEN_FILE.parent.mkdir(parents=True,exist_ok=True)
+        temp = TOKEN_FILE.with_suffix('.tmp')
+        temp.write_text(tunnel_token)
+        temp.chmod(0o644)  # The connector's non-root user reads this dedicated volume.
+        temp.replace(TOKEN_FILE)
+    return dict(configured=True,zone=cfg['zone_name'],tunnel_configured=bool(cfg.get('tunnel_id')))
+
+
+if __name__=='__main__':
+    try:
+        if sys.argv[1:]!=['setup']: raise ValueError('Use the local Cloudflare setup script.')
+        print(json.dumps(setup(json.load(sys.stdin))))
+    except (CloudflareError,ValueError) as exc:
+        print(json.dumps({'error':str(exc)})); sys.exit(1)
+    except Exception:
+        print(json.dumps({'error':'Cloudflare setup failed. Check connectivity and token permissions.'})); sys.exit(1)

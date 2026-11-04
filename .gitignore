@@ -1,0 +1,8 @@
+.env
+.secrets/
+__pycache__/
+*.db*
+
+.test-tools/
+.test-artifacts/
+

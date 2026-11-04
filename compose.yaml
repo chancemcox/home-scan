@@ -1,0 +1,29 @@
+services:
+  homescan:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      SCAN_MODE: agent
+      INGEST_TOKEN: ${INGEST_TOKEN:?Set INGEST_TOKEN in .env}
+    volumes:
+      - homescan-data:/data
+      - ./.secrets:/run/homescan-secrets:ro
+      - homescan-tunnel:/run/homescan-tunnel
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.0
+    profiles: [cloudflare]
+    restart: unless-stopped
+    command: [tunnel, --no-autoupdate, run, --token-file, /run/homescan-tunnel/token]
+    volumes:
+      - homescan-tunnel:/run/homescan-tunnel:ro
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  homescan-data:
+  homescan-tunnel:
