@@ -9,7 +9,7 @@
 <section class="panel" id="tunnels-panel" aria-labelledby="tunnels-heading">
 <div class="panel-head"><div><h2 id="tunnels-heading">Cloudflare tunnels</h2><p class="panel-copy">Account tunnels visible to the HomeScan API token. The HomeScan-managed tunnel is marked.</p></div><button id="tunnels-refresh" type="button" class="text-button">Refresh ↻</button></div>
 <p id="tunnels-meta" class="filter-meta" aria-live="polite"></p>
-<div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Connections</th><th>Created</th><th>ID</th></tr></thead><tbody id="tunnel-rows"><tr><td colspan="5">Connect Cloudflare, then refresh to load tunnels.</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Connections</th><th>Created</th><th>ID</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="tunnel-rows"><tr><td colspan="6">Connect Cloudflare, then refresh to load tunnels.</td></tr></tbody></table></div>
 </section>
 <div class="toolbar"><h2>Device inventory</h2><div class="filters"><label class="filter"><span class="sr-only">Status</span><select id="filter-status" aria-label="Filter by status"><option value="">All statuses</option><option value="seen">Seen</option><option value="not_seen">Not seen</option><option value="unknown">Unavailable</option></select></label><label class="filter"><span class="sr-only">Cloudflare</span><select id="filter-cloudflare" aria-label="Filter by Cloudflare"><option value="">All Cloudflare</option><option value="enabled">Routes enabled</option><option value="disabled">Not enabled</option><option value="attention">Needs attention</option></select></label><input id="search" type="search" placeholder="Search name, IP, MAC, or URL…" aria-label="Search devices"></div></div>
 <p id="filter-meta" class="filter-meta" aria-live="polite"></p>
@@ -53,6 +53,17 @@
 </fieldset>
 <p id="settings-error" class="error" role="alert"></p>
 <div class="dialog-actions"><button type="button" data-close="settings-dialog">Cancel</button><button id="settings-save" class="primary" type="submit">Save settings</button></div>
+</form>
+</dialog>
+<dialog id="tunnel-dialog">
+<form id="tunnel-form">
+<div class="dialog-head"><div><small class="eyebrow">CLOUDFLARE TUNNEL</small><h2>Edit tunnel</h2></div><button type="button" class="close" data-close="tunnel-dialog" aria-label="Close tunnel editor">×</button></div>
+<p id="tunnel-edit-id" class="mono"></p>
+<label for="tunnel-edit-name">Tunnel name</label><input id="tunnel-edit-name" maxlength="100" required autocomplete="off">
+<label for="tunnel-edit-config">Remote configuration (JSON)</label><textarea id="tunnel-edit-config" rows="16" spellcheck="false" required></textarea>
+<p class="hint">The last ingress rule must be a catch-all. HomeScan-managed device routes must be changed from the device inventory.</p>
+<p id="tunnel-edit-error" class="error" role="alert"></p>
+<div class="dialog-actions"><button type="button" data-close="tunnel-dialog">Cancel</button><button id="tunnel-edit-save" class="primary" type="submit">Save tunnel</button></div>
 </form>
 </dialog>
 </body></html>

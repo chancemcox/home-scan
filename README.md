@@ -42,6 +42,8 @@ The script prompts privately for the token, discovers the zone and account IDs, 
 
 The API token is stored in `/data/cloudflare.json` with owner-only file permissions, not in the dashboard, Docker image, command-line arguments, or Git. The connector token is in the `homescan-tunnel` volume, mounted read-only by cloudflared. Protect volume backups because the data volume includes credentials. The dashboard is intended for a trusted LAN; write endpoints reject cross-origin browser requests, but it has no user login.
 
+The Cloudflare tunnels table can edit the name and complete JSON ingress configuration of remotely managed tunnels. Locally managed tunnels are shown read-only. HomeScan-owned device ingress rules are protected from the general tunnel editor and must be changed through that device's **Configure** dialog, which keeps MAC/IP synchronization intact.
+
 The tunnel publishes the selected service to the Internet. Use the service's authentication or configure Cloudflare Access. For HTTPS names like `nas-web.house.chancecox.com`, a standard Universal SSL certificate on the `chancecox.com` zone does not cover that depth. Configure an appropriate edge certificate (for example Advanced Certificate Manager / Total TLS). No certificate purchases or account-plan changes are made by HomeScan. Local DNS-only HTTPS is handled by the local service's own certificate.
 
 Cloudflare references:

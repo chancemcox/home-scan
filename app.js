@@ -1,6 +1,6 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},selected=null;
+let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},selected=null,editingTunnel=null;
 let sortKey='hostname',sortDir=1;
 let suffix='.house.chancecox.com';
 const statusRank={seen:0,unknown:1,not_seen:2};
@@ -55,7 +55,7 @@ function renderTunnels(payload){
  const body=$('tunnel-rows');body.replaceChildren();
  if(payload.error){$('tunnels-meta').textContent=payload.error}
  else{$('tunnels-meta').textContent=payload.tunnels?.length?`${payload.tunnels.length} tunnel${payload.tunnels.length===1?'':'s'}`:'No tunnels returned for this account.'}
- if(!payload.tunnels?.length){const tr=document.createElement('tr');const td=cell(tr,payload.error||'No tunnels found.');td.colSpan=5;body.append(tr);return}
+ if(!payload.tunnels?.length){const tr=document.createElement('tr');const td=cell(tr,payload.error||'No tunnels found.');td.colSpan=6;body.append(tr);return}
  for(const t of payload.tunnels){
   const tr=document.createElement('tr');
   const name=cell(tr,t.name||'Unnamed tunnel');
@@ -64,8 +64,17 @@ function renderTunnels(payload){
   cell(tr,String(t.connections??0));
   cell(tr,t.created_at?new Date(t.created_at).toLocaleString():'—');
   cell(tr,t.id,'mono');
+  const action=cell(tr,'');const button=document.createElement('button');button.textContent='Edit';button.disabled=!t.editable;button.title=t.editable?'Edit tunnel name and ingress configuration':'Locally managed tunnels must be edited in their local configuration';button.addEventListener('click',()=>openTunnel(t.id));action.append(button);
   body.append(tr);
  }
+}
+async function openTunnel(id){
+ editingTunnel=id;$('tunnel-edit-error').textContent='';$('tunnel-edit-save').disabled=true;
+ $('tunnel-edit-id').textContent=id;$('tunnel-edit-name').value='Loading…';$('tunnel-edit-config').value='';$('tunnel-dialog').showModal();
+ try{
+  const r=await fetch('/api/cloudflare/tunnel?id='+encodeURIComponent(id));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');
+  $('tunnel-edit-name').value=result.name;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);$('tunnel-edit-save').disabled=false;
+ }catch(e){$('tunnel-edit-error').textContent=e.message}
 }
 async function loadTunnels(){
  $('tunnels-meta').textContent='Loading tunnels…';
@@ -110,6 +119,15 @@ $('settings-form').addEventListener('submit',async event=>{
   applyStatus();
  }catch(e){$('settings-error').textContent=e.message}
  finally{$('settings-save').disabled=false}
+});
+$('tunnel-form').addEventListener('submit',async event=>{
+ event.preventDefault();$('tunnel-edit-save').disabled=true;$('tunnel-edit-error').textContent='';
+ try{
+  let config;try{config=JSON.parse($('tunnel-edit-config').value)}catch(_){throw Error('Configuration must be valid JSON.')}
+  await post('/api/cloudflare/tunnels/update',{tunnel_id:editingTunnel,name:$('tunnel-edit-name').value,config});
+  $('tunnel-dialog').close();await loadTunnels();
+ }catch(e){$('tunnel-edit-error').textContent=e.message}
+ finally{$('tunnel-edit-save').disabled=false}
 });
 for(const id of ['local-enabled','tunnel-enabled'])$(id).addEventListener('change',updateFields);
 $('deco-enabled').addEventListener('change',updateDecoFields);

@@ -2,10 +2,10 @@ import os, json, threading, time, subprocess, ipaddress, secrets
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 import storage
 from storage import device_states
-from cloudflare_sync import Manager
+from cloudflare_sync import Manager, CloudflareError
 import deco
 from ws import Hub
 
@@ -84,20 +84,31 @@ class Handler(BaseHTTPRequestHandler):
                 and self.headers.get('Content-Type','').split(';')[0]=='application/json')
 
     def do_GET(self):
+        parsed = urlsplit(self.path)
         assets={'/':('index.html','text/html; charset=utf-8'),'/app.js':('app.js','application/javascript; charset=utf-8'),'/style.css':('style.css','text/css; charset=utf-8')}
-        if self.path in assets:
-            name,mime = assets[self.path]
+        if parsed.path in assets:
+            name,mime = assets[parsed.path]
             return self.send(200,Path(__file__).with_name(name).read_bytes(),mime)
         if self.path=='/ws': return HUB.serve(self, devices_payload)
         if self.path=='/health': return self.send(200,b'{"ok":true}')
         if self.path=='/api/cloudflare': return self.send(200,json.dumps(CLOUDFLARE.public_state()).encode())
         if self.path=='/api/cloudflare/tunnels': return self.send(200,json.dumps(CLOUDFLARE.list_tunnels()).encode())
+        if parsed.path=='/api/cloudflare/tunnel':
+            try:
+                tunnel_id = parse_qs(parsed.query).get('id',[''])[0]
+                return self.send(200,json.dumps(CLOUDFLARE.get_tunnel(tunnel_id)).encode())
+            except (ValueError, KeyError, TypeError) as exc:
+                return self.send(400,json.dumps({'error':str(exc)}).encode())
+            except CloudflareError as exc:
+                return self.send(502,json.dumps({'error':str(exc)}).encode())
+            except Exception:
+                return self.send(502,b'{"error":"Cloudflare could not load this tunnel."}')
         if self.path=='/api/deco': return self.send(200,json.dumps(deco.public_state()).encode())
         if self.path!='/api/devices': return self.send(404,b'{}')
         self.send(200,devices_payload().encode())
 
     def do_POST(self):
-        if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync','/api/deco/settings'):
+        if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync','/api/cloudflare/tunnels/update','/api/deco/settings'):
             if not self.same_origin(): return self.send(403,b'{"error":"Use the HomeScan dashboard to change settings."}')
             try:
                 body = self.body()
@@ -105,12 +116,18 @@ class Handler(BaseHTTPRequestHandler):
                     state = deco.save_settings(body)
                     publish()
                     return self.send(200,json.dumps(dict(ok=True,**state)).encode())
+                if self.path=='/api/cloudflare/tunnels/update':
+                    result = CLOUDFLARE.update_tunnel(body)
+                    publish()
+                    return self.send(200,json.dumps(result).encode())
                 if self.path.endswith('/settings'): CLOUDFLARE.save(body)
                 else: CLOUDFLARE.wake.set()
                 publish()
                 return self.send(200,b'{"ok":true}')
             except (ValueError,KeyError,TypeError) as exc:
                 return self.send(400,json.dumps({'error':str(exc)}).encode())
+            except CloudflareError as exc:
+                return self.send(502,json.dumps({'error':str(exc)}).encode())
         if self.path!='/api/scan' or MODE!='agent': return self.send(404,b'{}')
         if not TOKEN or not secrets.compare_digest(self.headers.get('Authorization',''),'Bearer '+TOKEN):
             return self.send(401,b'{"error":"Unauthorized"}')

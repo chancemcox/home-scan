@@ -42,6 +42,25 @@ class FakeAPI:
         self.records[rid]=dict(body,id=rid)
         return copy.deepcopy(self.records[rid])
 
+class TunnelEditingAPI:
+    TID='11111111-2222-3333-4444-555555555555'
+    def __init__(self, config_src='cloudflare'):
+        self.tunnel=dict(id=self.TID,name='paperless',config_src=config_src)
+        self.config={'ingress':[{'hostname':'docs.example.com','service':'http://192.168.2.10:8000'},
+                                {'service':'http_status:404'}]}
+        self.writes=[]
+    def call(self,method,path,body=None):
+        if path.endswith('/configurations'):
+            if method=='GET': return {'config':copy.deepcopy(self.config)}
+            self.writes.append((method,path,copy.deepcopy(body)))
+            self.config=copy.deepcopy(body['config']);return {'config':copy.deepcopy(self.config)}
+        if path.endswith('/'+self.TID):
+            if method=='GET': return copy.deepcopy(self.tunnel)
+            self.writes.append((method,path,copy.deepcopy(body)))
+            self.tunnel['name']=body['name'];return copy.deepcopy(self.tunnel)
+        if method=='GET': return [copy.deepcopy(self.tunnel)]
+        raise AssertionError((method,path,body))
+
 class IntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
@@ -134,6 +153,42 @@ class IntegrationTests(unittest.TestCase):
         with storage.connect(self.db) as db: before=db.execute('SELECT count(*) FROM scans').fetchone()[0]
         with self.assertRaises(ValueError): storage.record_batches(self.db,[dict(source='network',hosts=[dict(ip='invalid')])])
         with storage.connect(self.db) as db: self.assertEqual(db.execute('SELECT count(*) FROM scans').fetchone()[0],before)
+
+class TunnelEditingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.db=str(Path(self.temp.name)/'test.db');storage.init(self.db)
+        self.cfg=Path(self.temp.name)/'cloudflare.json'
+        self.cfg.write_text(json.dumps(dict(api_token='test-secret',account_id='account',zone_id='zone',
+                                            zone_name='example.com',tunnel_id=TunnelEditingAPI.TID)))
+        self.api=TunnelEditingAPI();self.m=Manager(self.db,self.cfg,lambda token:self.api);self.m.init()
+
+    def test_load_and_update_existing_tunnel(self):
+        detail=self.m.get_tunnel(TunnelEditingAPI.TID)
+        self.assertEqual(detail['name'],'paperless')
+        desired={'ingress':[{'hostname':'files.example.com','service':'http://192.168.2.20:8080'},
+                            {'service':'http_status:404'}]}
+        result=self.m.update_tunnel(dict(tunnel_id=TunnelEditingAPI.TID,name='files',config=desired))
+        self.assertEqual(result['name'],'files');self.assertEqual(result['config'],desired)
+        self.assertEqual([write[0] for write in self.api.writes],['PATCH','PUT'])
+
+    def test_tunnel_editor_validation_and_local_config(self):
+        bad=[{}, {'ingress':[]}, {'ingress':[{'hostname':'x','service':'http://x'}]},
+             {'ingress':[{'service':''}]}, {'ingress':[{'service':'http_status:404','originRequest':'bad'}]}]
+        for config in bad:
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                self.m.update_tunnel(dict(tunnel_id=TunnelEditingAPI.TID,name='x',config=config))
+        self.api.tunnel['config_src']='local'
+        with self.assertRaises(ValueError): self.m.get_tunnel(TunnelEditingAPI.TID)
+
+    def test_protects_homescan_owned_ingress(self):
+        with storage.connect(self.db) as db:
+            db.execute("INSERT INTO cf_resources VALUES('route','docs.example.com','tunnel',NULL)")
+        desired={'ingress':[{'hostname':'docs.example.com','service':'http://192.168.2.99:8000'},
+                            {'service':'http_status:404'}]}
+        with self.assertRaisesRegex(ValueError,'device settings'):
+            self.m.update_tunnel(dict(tunnel_id=TunnelEditingAPI.TID,name='paperless',config=desired))
+        self.assertEqual(self.api.writes,[])
 
 class MigrationTests(unittest.TestCase):
     def test_legacy_rows_merge_by_mac_with_history_preserved(self):

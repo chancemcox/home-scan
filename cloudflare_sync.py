@@ -128,10 +128,90 @@ class Manager:
                 status=row.get('status') or ('healthy' if connections else 'inactive'),
                 created_at=row.get('created_at') or '',
                 connections=len(connections),
+                config_src=row.get('config_src') or '',
+                editable=(row.get('config_src') == 'cloudflare'),
                 homescan=(row.get('id') == cfg.get('tunnel_id')),
             ))
         tunnels.sort(key=lambda t: (not t['homescan'], t['name'].lower()))
         return dict(configured=True, tunnels=tunnels, error='')
+
+    def _tunnel_api(self):
+        try: cfg = self.config()
+        except (ValueError, OSError): cfg = {}
+        if not cfg.get('api_token') or not cfg.get('account_id'):
+            raise ValueError('Connect Cloudflare before editing tunnels.')
+        return cfg, self.api_factory(cfg['api_token'])
+
+    @staticmethod
+    def _tunnel_id(value):
+        value = str(value or '').strip().lower()
+        if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', value):
+            raise ValueError('Invalid tunnel ID.')
+        return value
+
+    @staticmethod
+    def _tunnel_config(value):
+        if not isinstance(value, dict): raise ValueError('Tunnel configuration must be a JSON object.')
+        # Round-trip advanced Cloudflare options, while strictly checking the ingress
+        # shape that can affect routing and keeping requests bounded.
+        if len(json.dumps(value, separators=(',', ':'))) > 262144:
+            raise ValueError('Tunnel configuration is too large.')
+        ingress = value.get('ingress')
+        if not isinstance(ingress, list) or not 1 <= len(ingress) <= 200:
+            raise ValueError('Tunnel configuration needs between 1 and 200 ingress rules.')
+        for rule in ingress:
+            if not isinstance(rule, dict): raise ValueError('Every ingress rule must be a JSON object.')
+            service = rule.get('service')
+            if not isinstance(service, str) or not service.strip() or len(service) > 2048:
+                raise ValueError('Every ingress rule needs a valid service.')
+            for key in ('hostname', 'path'):
+                if key in rule and (not isinstance(rule[key], str) or len(rule[key]) > 2048):
+                    raise ValueError(f'Ingress {key} must be text.')
+            if 'originRequest' in rule and not isinstance(rule['originRequest'], dict):
+                raise ValueError('Ingress originRequest must be a JSON object.')
+        last = ingress[-1]
+        if last.get('hostname') or last.get('path'):
+            raise ValueError('The final ingress rule must be a catch-all without hostname or path.')
+        return value
+
+    def get_tunnel(self, tunnel_id):
+        tunnel_id = self._tunnel_id(tunnel_id)
+        cfg, api = self._tunnel_api()
+        base = f"/accounts/{cfg['account_id']}/cfd_tunnel/{tunnel_id}"
+        tunnel = api.call('GET', base) or {}
+        if tunnel.get('config_src') != 'cloudflare':
+            raise ValueError('This tunnel is locally managed and cannot be edited from HomeScan.')
+        response = api.call('GET', base + '/configurations') or {}
+        config = response.get('config') or {'ingress':[{'service':'http_status:404'}]}
+        return dict(id=tunnel_id, name=tunnel.get('name') or '', config=config,
+                    homescan=(tunnel_id == cfg.get('tunnel_id')))
+
+    def update_tunnel(self, body):
+        tunnel_id = self._tunnel_id(body.get('tunnel_id'))
+        name = str(body.get('name') or '').strip()
+        if not 1 <= len(name) <= 100 or re.search(r'[\x00-\x1f\x7f]', name):
+            raise ValueError('Tunnel name must be between 1 and 100 characters.')
+        desired = self._tunnel_config(body.get('config'))
+        with self.lock:
+            cfg, api = self._tunnel_api()
+            base = f"/accounts/{cfg['account_id']}/cfd_tunnel/{tunnel_id}"
+            tunnel = api.call('GET', base) or {}
+            if tunnel.get('config_src') != 'cloudflare':
+                raise ValueError('This tunnel is locally managed and cannot be edited from HomeScan.')
+            response = api.call('GET', base + '/configurations') or {}
+            current = response.get('config') or {'ingress':[{'service':'http_status:404'}]}
+            if tunnel_id == cfg.get('tunnel_id'):
+                with storage.connect(self.db_path) as db:
+                    owned = {r['hostname'] for r in db.execute("SELECT hostname FROM cf_resources WHERE kind='tunnel'")}
+                before = {r.get('hostname'):r for r in current.get('ingress',[]) if r.get('hostname') in owned}
+                after = {r.get('hostname'):r for r in desired.get('ingress',[]) if r.get('hostname') in owned}
+                if before != after:
+                    raise ValueError('HomeScan-managed ingress rules must be edited from their device settings.')
+            if tunnel.get('name') != name:
+                api.call('PATCH', base, {'name':name})
+            if current != desired:
+                api.call('PUT', base + '/configurations', {'config':desired})
+        return self.get_tunnel(tunnel_id)
 
     def save(self, body):
         did = str(body.get('device_id',''))
