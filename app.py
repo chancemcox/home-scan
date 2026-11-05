@@ -78,6 +78,7 @@ def init():
     CLOUDFLARE.init()
     if storage.backend_state().get('kind') == 'd1':
         storage.migrate_local_to_d1(DB)
+        CLOUDFLARE.sync_shared_settings()
     node_id = cfg.get('installation_id') or None
     CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish(), node_id=node_id,
                       cluster_state=build_cluster_state(cfg, node_id))
@@ -232,6 +233,7 @@ class Handler(BaseHTTPRequestHandler):
                     CLOUDFLARE.init()
                     if storage.backend_state().get('kind') == 'd1':
                         storage.migrate_local_to_d1(DB)
+                        CLOUDFLARE.sync_shared_settings()
                     publish()
                     return self.send(200,json.dumps(dict(ok=True,**result)).encode())
                 if self.path=='/api/cloudflare/tunnels/update':

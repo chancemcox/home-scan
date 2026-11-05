@@ -253,6 +253,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(result['suffix'],'lan.example.org')
         self.assertEqual(self.m.suffix(),'lan.example.org')
         self.assertEqual(self.m.public_state()['suffix'],'lan.example.org')
+        self.assertEqual(storage.get_settings(self.db,('suffix',))['suffix'],'lan.example.org')
         self.save(local=True,tunnel=False,localname='nas')
         with storage.connect(self.db) as db:
             row=db.execute("SELECT hostname FROM cf_routes WHERE kind='local'").fetchone()
@@ -262,6 +263,27 @@ class IntegrationTests(unittest.TestCase):
         with storage.connect(self.db) as db:
             row=db.execute("SELECT hostname FROM cf_routes WHERE kind='tunnel'").fetchone()
         self.assertEqual(row['hostname'],'app.cdn.example.com')
+    def test_shared_settings_sync_and_suffix_backfill(self):
+        from cloudflare_sync import infer_suffix_from_hostnames
+        self.assertEqual(
+            infer_suffix_from_hostnames(
+                ['cmcwin.house.chancecox.com','cam.house.chancecox.com'],
+                'chancecox.com'),
+            'house.chancecox.com')
+        payload=self.m.sync_shared_settings()
+        self.assertEqual(payload['suffix'],'house.chancecox.com')
+        self.assertEqual(storage.get_settings(self.db)['suffix'],'house.chancecox.com')
+        self.assertEqual(storage.get_settings(self.db)['zone_name'],'chancecox.com')
+        raw=json.loads(self.cfg.read_text()); raw.pop('suffix',None); self.cfg.write_text(json.dumps(raw))
+        self.assertEqual(self.m.suffix(),'house.chancecox.com')
+        self.save(local=True,tunnel=False,localname='nas')
+        with storage.connect(self.db) as db:
+            db.execute('DELETE FROM app_settings')
+        raw=json.loads(self.cfg.read_text()); raw.pop('suffix',None); self.cfg.write_text(json.dumps(raw))
+        self.m.init()
+        self.assertEqual(self.m.suffix(),'house.chancecox.com')
+        self.assertEqual(json.loads(self.cfg.read_text())['suffix'],'house.chancecox.com')
+        self.assertEqual(storage.get_settings(self.db)['suffix'],'house.chancecox.com')
     def test_validation_and_hostname_collision(self):
         for value in ('*.house.chancecox.com','nas.evil.com','a.b.house.chancecox.com','https://nas.house.chancecox.com/path'):
             with self.assertRaises(ValueError): hostname(value, suffix='house.chancecox.com')

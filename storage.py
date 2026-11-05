@@ -68,6 +68,7 @@ def init(path):
             db.execute('PRAGMA journal_mode=WAL')
         db.executescript('''
         CREATE TABLE IF NOT EXISTS status(key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS scans(id INTEGER PRIMARY KEY, started TEXT, finished TEXT, error TEXT, source TEXT NOT NULL DEFAULT 'network');
         CREATE TABLE IF NOT EXISTS sightings(scan_id INTEGER, ip TEXT, hostname TEXT, mac TEXT, device_id TEXT, PRIMARY KEY(scan_id,ip));
         CREATE TABLE IF NOT EXISTS ip_assignments(ip TEXT PRIMARY KEY, device_id TEXT, last_seen TEXT);
@@ -112,43 +113,82 @@ def init(path):
         db.execute('CREATE INDEX IF NOT EXISTS sightings_device ON sightings(device_id,scan_id)')
 
 
+def get_settings(path, keys=None):
+    """Return app_settings rows. When keys is set, only those entries are returned."""
+    wanted = set(keys) if keys is not None else None
+    with connect(path) as db:
+        rows = db.execute('SELECT key, value FROM app_settings').fetchall()
+    result = {}
+    for row in rows:
+        key = row['key']
+        if wanted is not None and key not in wanted:
+            continue
+        result[key] = row['value']
+    return result
+
+
+def set_settings(path, mapping):
+    """Upsert shared install settings (non-secret)."""
+    if not mapping:
+        return
+    with connect(path) as db:
+        for key, value in mapping.items():
+            if value in (None, ''):
+                continue
+            db.execute(
+                'INSERT INTO app_settings(key, value) VALUES(?,?) '
+                'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                (str(key), str(value)),
+            )
+
+
 def migrate_local_to_d1(path):
-    """Copy local SQLite inventory into an empty shared D1 database once."""
+    """Copy local SQLite inventory into an empty shared D1 database once.
+
+    Shared app_settings are always upserted so former hardcoded install defaults
+    (base domain, zone, tunnel id, …) reach D1 even when inventory already exists.
+    """
     if _BACKEND.get('kind') != 'd1' or not Path(path).exists():
         return False
-    with connect(path) as remote:
-        existing = remote.execute('SELECT count(*) AS c FROM devices').fetchone()
-        if existing and int(existing['c'] or 0) > 0:
-            return False
     local = sqlite3.connect(path, timeout=30)
     local.row_factory = sqlite3.Row
+    copied = False
     try:
-        tables = ('status', 'scans', 'sightings', 'ip_assignments', 'devices', 'device_sources',
-                  'cf_routes', 'cf_resources', 'cf_tunnel_links')
         with connect(path) as remote:
+            existing = remote.execute('SELECT count(*) AS c FROM devices').fetchone()
+            empty = not existing or int(existing['c'] or 0) == 0
+            tables = ('status', 'app_settings', 'scans', 'sightings', 'ip_assignments', 'devices',
+                      'device_sources', 'cf_routes', 'cf_resources', 'cf_tunnel_links')
             for table in tables:
                 present = local.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
                 ).fetchone()
-                remote_present = remote.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-                ).fetchone()
-                if not present or not remote_present:
+                if not present:
                     continue
                 rows = local.execute(f'SELECT * FROM {table}').fetchall()
                 if not rows:
+                    continue
+                if table != 'app_settings' and not empty:
                     continue
                 cols = rows[0].keys()
                 placeholders = ','.join('?' for _ in cols)
                 col_list = ','.join(cols)
                 for row in rows:
-                    remote.execute(
-                        f'INSERT OR IGNORE INTO {table}({col_list}) VALUES({placeholders})',
-                        [row[c] for c in cols],
-                    )
+                    if table == 'app_settings':
+                        remote.execute(
+                            'INSERT INTO app_settings(key, value) VALUES(?,?) '
+                            'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                            [row['key'], row['value']],
+                        )
+                    else:
+                        remote.execute(
+                            f'INSERT OR IGNORE INTO {table}({col_list}) VALUES({placeholders})',
+                            [row[c] for c in cols],
+                        )
+                copied = True
     finally:
         local.close()
-    return True
+    return copied
 
 
 def normalize(hosts):

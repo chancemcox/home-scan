@@ -49,6 +49,13 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(devices[0]['device_id'], 'mac:' + MAC)
         self.assertEqual(devices[0]['hostname'], 'NAS')
 
+    def test_app_settings_round_trip(self):
+        storage.set_settings(self.db, {'suffix': 'house.example.com', 'zone_name': 'example.com'})
+        self.assertEqual(storage.get_settings(self.db, ('suffix',)), {'suffix': 'house.example.com'})
+        storage.set_settings(self.db, {'suffix': 'lan.example.com'})
+        self.assertEqual(storage.get_settings(self.db)['suffix'], 'lan.example.com')
+        self.assertEqual(storage.get_settings(self.db)['zone_name'], 'example.com')
+
 
 if __name__ == '__main__':
     unittest.main()

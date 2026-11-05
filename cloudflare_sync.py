@@ -18,6 +18,11 @@ OLD_SUFFIXES = tuple(s for s in os.getenv('HOMESCAN_OLD_SUFFIXES', '').split(','
 LABEL_RE = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
 CONFIG = Path(os.getenv('CLOUDFLARE_CONFIG','/data/cloudflare.json'))
 TOKEN_FILE = Path(os.getenv('CLOUDFLARE_TUNNEL_TOKEN','/run/homescan-tunnel/token'))
+# Non-secret install settings formerly hardcoded — shared via SQLite/D1 app_settings.
+SHARED_SETTING_KEYS = (
+    'suffix', 'zone_id', 'zone_name', 'account_id', 'tunnel_id',
+    'installation_id', 'd1_database_id', 'cluster_worker_url',
+)
 
 
 class CloudflareError(Exception):
@@ -119,6 +124,27 @@ def zone_candidates_for_suffix(suffix):
     return ['.'.join(parts[i:]) for i in range(len(parts)-1)]
 
 
+def infer_suffix_from_hostnames(hostnames, zone_name=''):
+    """Recover a base domain from existing managed hostnames (post-hardcoding installs)."""
+    zone = str(zone_name or '').strip().lower().rstrip('.')
+    counts = {}
+    for raw in hostnames:
+        name = str(raw or '').strip().lower().rstrip('.')
+        if not name or '.' not in name:
+            continue
+        candidate = name.split('.', 1)[1]
+        if zone and not (candidate == zone or candidate.endswith('.' + zone)):
+            continue
+        try:
+            candidate = normalize_suffix(candidate)
+        except ValueError:
+            continue
+        counts[candidate] = counts.get(candidate, 0) + 1
+    if not counts:
+        return ''
+    return max(counts.items(), key=lambda item: (item[1], len(item[0])))[0]
+
+
 def private_ip(value):
     ip = ipaddress.IPv4Address(value)
     if not any(ip in ipaddress.IPv4Network(n) for n in ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16')):
@@ -148,6 +174,7 @@ class Manager:
                 hostname TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', device_id TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'pending', message TEXT NOT NULL DEFAULT '', synced_ip TEXT,
                 last_checked TEXT, UNIQUE(tunnel_id,hostname,path));
+            CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             ''')
             # Optional one-time rewrite when HOMESCAN_OLD_SUFFIXES and a new suffix are set.
             new_suffix = ''
@@ -167,10 +194,59 @@ class Manager:
                         db.execute('''UPDATE cf_routes SET hostname=?,
                             state=CASE WHEN enabled=1 THEN 'pending' ELSE state END, message='' WHERE id=?''',
                                    (new, row['id']))
+        self.sync_shared_settings()
 
     def config(self):
-        try: return json.loads(self.config_path.read_text())
-        except FileNotFoundError: return {}
+        try:
+            cfg = json.loads(self.config_path.read_text()) if self.config_path.exists() else {}
+        except (FileNotFoundError, ValueError, OSError):
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        try:
+            shared = storage.get_settings(self.db_path, SHARED_SETTING_KEYS)
+        except Exception:
+            shared = {}
+        for key in SHARED_SETTING_KEYS:
+            if shared.get(key):
+                cfg[key] = shared[key]
+        return cfg
+
+    def sync_shared_settings(self):
+        """Keep former hardcoded install defaults in the DB (and D1 when enabled)."""
+        with self.lock:
+            try:
+                local = json.loads(self.config_path.read_text()) if self.config_path.exists() else {}
+            except (ValueError, OSError):
+                local = {}
+            if not isinstance(local, dict):
+                local = {}
+            try:
+                shared = storage.get_settings(self.db_path, SHARED_SETTING_KEYS)
+            except Exception:
+                shared = {}
+            changed = False
+            for key in SHARED_SETTING_KEYS:
+                if not local.get(key) and shared.get(key):
+                    local[key] = shared[key]
+                    changed = True
+            if not local.get('suffix'):
+                try:
+                    with storage.connect(self.db_path) as db:
+                        names = [row['hostname'] for row in db.execute(
+                            "SELECT hostname FROM cf_routes WHERE hostname IS NOT NULL AND hostname<>''")]
+                except Exception:
+                    names = []
+                inferred = infer_suffix_from_hostnames(names, local.get('zone_name') or shared.get('zone_name') or '')
+                if inferred:
+                    local['suffix'] = inferred
+                    changed = True
+            if changed:
+                atomic_json(self.config_path, local)
+            payload = {key: local[key] for key in SHARED_SETTING_KEYS if local.get(key) not in (None, '')}
+            if payload:
+                storage.set_settings(self.db_path, payload)
+            return payload
 
     def suffix(self):
         try: cfg = self.config()
@@ -185,10 +261,15 @@ class Manager:
         """Persist the dashboard base domain used for local DNS and short tunnel labels."""
         suffix = normalize_suffix(body.get('suffix') or body.get('domain'))
         with self.lock:
-            try: cfg = self.config()
-            except (ValueError, OSError): cfg = {}
+            try:
+                cfg = json.loads(self.config_path.read_text()) if self.config_path.exists() else {}
+            except (ValueError, OSError):
+                cfg = {}
+            if not isinstance(cfg, dict):
+                cfg = {}
             cfg['suffix'] = suffix
             atomic_json(self.config_path, cfg)
+            storage.set_settings(self.db_path, {'suffix': suffix})
         return dict(ok=True, suffix=suffix)
 
     def public_state(self):
@@ -741,6 +822,7 @@ class Manager:
         """Dashboard/API path for adding or rotating the Cloudflare API token."""
         with self.lock:
             result = connect_cloudflare(body, self.config_path, self.api_factory, TOKEN_FILE)
+        self.sync_shared_settings()
         self.wake.set()
         return result
 
