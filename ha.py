@@ -1,8 +1,9 @@
-"""Active-passive HomeScan cluster over homescan.house.chancecox.com.
+"""Active-passive HomeScan cluster.
 
-All nodes resolve the shared hostname. The leader publishes WebSocket heartbeats
-on /ha, owns the Cloudflare local A record, and accepts scanner ingest. Followers
-watch heartbeats; if the leader goes silent they claim DNS and take over.
+When a Cloudflare Durable Object cluster worker is configured, leadership and live
+inventory are coordinated there (in-memory shared state). Otherwise nodes fall
+back to DNS + WebSocket heartbeats. Hostnames and IPs come from environment /
+Cloudflare settings — nothing personal is hardcoded.
 """
 import json
 import os
@@ -12,14 +13,14 @@ import threading
 import time
 import uuid
 import ws
-from cloudflare_sync import CloudflareError, private_ip, SUFFIX
+from cloudflare_sync import CloudflareError, private_ip
+from cluster_state import ClusterStateError
 
-HA_HOSTNAME = os.getenv('HA_HOSTNAME', 'homescan.' + SUFFIX).strip().lower().rstrip('.')
+HA_HOSTNAME = os.getenv('HA_HOSTNAME', '').strip().lower().rstrip('.')
 HA_PORT = int(os.getenv('HA_PORT', '8080'))
 HA_ENABLED = os.getenv('HA_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 HEARTBEAT = float(os.getenv('HA_HEARTBEAT', '3'))
 TIMEOUT = float(os.getenv('HA_TIMEOUT', '12'))
-COMMENT = 'homescan:ha'
 
 
 def detect_local_ip():
@@ -120,15 +121,16 @@ def connect_ha(host, port, path='/ha', timeout=5):
 
 
 class Cluster:
-    def __init__(self, cloudflare, on_change=None, hostname=HA_HOSTNAME, port=HA_PORT,
-                 local_ip=None, node_id=None, enabled=HA_ENABLED):
+    def __init__(self, cloudflare, on_change=None, hostname=None, port=HA_PORT,
+                 local_ip=None, node_id=None, enabled=HA_ENABLED, cluster_state=None):
         self.cloudflare = cloudflare
         self.on_change = on_change
-        self.hostname = hostname
+        self.hostname = (hostname if hostname is not None else HA_HOSTNAME).strip().lower().rstrip('.')
         self.port = port
         self.enabled = enabled
         self.node_id = node_id or uuid.uuid4().hex
         self.local_ip = local_ip
+        self.cluster_state = cluster_state
         self.role = 'disabled' if not enabled else 'starting'
         self.leader = {}
         self.message = ''
@@ -137,18 +139,34 @@ class Cluster:
         self._stop = threading.Event()
         self._generation = 0
 
+    def resolve_hostname(self):
+        if self.hostname:
+            return self.hostname
+        try:
+            suffix = self.cloudflare.suffix()
+        except Exception:
+            suffix = ''
+        if suffix:
+            return 'homescan.' + suffix
+        return ''
+
     def public_state(self):
+        shared = {}
+        if self.cluster_state and self.cluster_state.enabled:
+            try: shared = self.cluster_state.public_state()
+            except Exception: shared = dict(enabled=True, backend='durable-object-memory')
         with self.lock:
             return dict(
                 enabled=self.enabled,
                 role=self.role,
-                hostname=self.hostname,
+                hostname=self.resolve_hostname(),
                 port=self.port,
                 local_ip=self.local_ip or '',
                 node_id=self.node_id,
                 leader=dict(self.leader),
                 scanning=self.role == 'leader',
                 message=self.message,
+                shared=shared,
             )
 
     def is_leader(self):
@@ -162,12 +180,10 @@ class Cluster:
             if leader is not None:
                 self.leader = leader
             elif role == 'leader':
-                self.leader = dict(node_id=self.node_id, ip=self.local_ip, hostname=self.hostname)
-            generation = self._generation
+                self.leader = dict(node_id=self.node_id, ip=self.local_ip, hostname=self.resolve_hostname())
         if changed and self.on_change:
             try: self.on_change(self.public_state())
             except Exception: pass
-        return generation
 
     def ensure_local_ip(self):
         if not self.local_ip:
@@ -176,13 +192,27 @@ class Cluster:
 
     def claim(self, reason='failover'):
         ip = self.ensure_local_ip()
-        self.cloudflare.ensure_ha_dns(ip, self.hostname)
+        name = self.resolve_hostname()
+        if not name:
+            raise ValueError('Set HA_HOSTNAME or a base domain in Settings before enabling the cluster.')
+        self.cloudflare.ensure_ha_dns(ip, name)
         self._generation += 1
         self._set_role('leader', 'Active · claimed DNS ('+reason+')')
         return ip
 
+    def shared_inventory(self):
+        if not self.cluster_state or not self.cluster_state.enabled:
+            return None
+        try: return self.cluster_state.get_inventory()
+        except Exception: return None
+
+    def publish_inventory(self, payload):
+        if not self.cluster_state or not self.cluster_state.enabled or not self.is_leader():
+            return
+        try: self.cluster_state.publish_inventory(payload)
+        except Exception: pass
+
     def serve(self, handler):
-        """WebSocket upgrade for /ha peers."""
         if not self.is_leader():
             return handler.send(503, json.dumps({
                 'error': 'This HomeScan node is not the cluster leader.',
@@ -193,7 +223,7 @@ class Cluster:
 
     def _heartbeat_payload(self):
         return dict(type='heartbeat', node_id=self.node_id, ip=self.local_ip or '',
-                    hostname=self.hostname, ts=time.time(), generation=self._generation)
+                    hostname=self.resolve_hostname(), ts=time.time(), generation=self._generation)
 
     def broadcast(self):
         if self.role != 'leader':
@@ -201,12 +231,13 @@ class Cluster:
         self.hub.broadcast(json.dumps(self._heartbeat_payload()))
 
     def _follow(self, leader_ip):
+        name = self.resolve_hostname()
         self._set_role('follower', 'Standby · watching '+leader_ip,
-                       leader=dict(ip=leader_ip, hostname=self.hostname))
+                       leader=dict(ip=leader_ip, hostname=name))
         client = None
         last = time.monotonic()
         try:
-            client = connect_ha(self.hostname, self.port)
+            client = connect_ha(name, self.port)
             client.sock.settimeout(max(1.0, HEARTBEAT + 1))
             client.send_text(json.dumps(dict(type='hello', node_id=self.node_id, ip=self.local_ip or '')))
             timed_out = False
@@ -237,7 +268,7 @@ class Cluster:
                 last = time.monotonic()
                 self._set_role('follower', 'Standby · leader '+str(message.get('ip') or leader_ip),
                                leader=dict(node_id=message.get('node_id'), ip=message.get('ip'),
-                                           hostname=self.hostname, generation=message.get('generation')))
+                                           hostname=name, generation=message.get('generation')))
             if self._stop.is_set():
                 return
             if saw_self:
@@ -266,15 +297,24 @@ class Cluster:
             self._set_role('error', str(exc))
             time.sleep(5)
             return
+        if self.cluster_state and self.cluster_state.enabled:
+            self.cluster_state.local_ip = self.local_ip or ''
+            self._tick_durable_object()
+            return
+        name = self.resolve_hostname()
+        if not name:
+            self._set_role('waiting', 'Set HA_HOSTNAME or a base domain in Settings')
+            time.sleep(5)
+            return
         try:
             cfg = self.cloudflare.config()
         except (OSError, ValueError):
             cfg = {}
         if not cfg.get('api_token'):
-            self._set_role('waiting', 'Connect Cloudflare so HA can manage '+self.hostname)
+            self._set_role('waiting', 'Connect Cloudflare so HA can manage '+name)
             time.sleep(5)
             return
-        ips = resolve_ipv4(self.hostname)
+        ips = resolve_ipv4(name)
         if not ips:
             try:
                 self.claim('dns-missing')
@@ -297,21 +337,53 @@ class Cluster:
         self._follow(ips[0])
 
     def _lead_until_step_down(self):
-        """Broadcast heartbeats while DNS still points at this node."""
+        name = self.resolve_hostname()
         self._set_role('leader', 'Active · scanning')
         while not self._stop.is_set() and self.role == 'leader':
             self.broadcast()
             time.sleep(HEARTBEAT)
-            ips = resolve_ipv4(self.hostname)
+            ips = resolve_ipv4(name)
             if ips and self.local_ip not in ips:
                 self._set_role('follower', 'Standby · DNS moved to '+ips[0],
-                               leader=dict(ip=ips[0], hostname=self.hostname))
+                               leader=dict(ip=ips[0], hostname=name))
                 return
-            # Refresh DNS in case TTL/cache drifted or record was deleted.
             try:
-                self.cloudflare.ensure_ha_dns(self.local_ip, self.hostname)
+                self.cloudflare.ensure_ha_dns(self.local_ip, name)
             except (CloudflareError, ValueError) as exc:
                 self.message = str(exc)
+
+    def _tick_durable_object(self):
+        name = self.resolve_hostname()
+        try:
+            if self.cluster_state.try_become_leader() or self.cluster_state.is_leader():
+                if name:
+                    try:
+                        self.cloudflare.ensure_ha_dns(self.local_ip, name)
+                    except (CloudflareError, ValueError, OSError) as exc:
+                        self.message = str(exc)
+                self._generation += 1
+                self._set_role('leader', 'Active · Durable Object leader')
+                while not self._stop.is_set() and self.role == 'leader':
+                    if not self.cluster_state.renew_leadership():
+                        leader = self.cluster_state.get_leader()
+                        self._set_role('follower', 'Standby · lost Durable Object lease',
+                                       leader=dict(leader or {}, hostname=name))
+                        return
+                    self.broadcast()
+                    if name:
+                        try:
+                            self.cloudflare.ensure_ha_dns(self.local_ip, name)
+                        except (CloudflareError, ValueError, OSError) as exc:
+                            self.message = str(exc)
+                    self._stop.wait(HEARTBEAT)
+                return
+            leader = self.cluster_state.get_leader()
+            self._set_role('follower', 'Standby · Durable Object leader '+(leader.get('ip') or leader.get('node_id') or ''),
+                           leader=dict(leader or {}, hostname=name))
+            self._stop.wait(HEARTBEAT)
+        except ClusterStateError as exc:
+            self._set_role('error', str(exc))
+            self._stop.wait(5)
 
     def run(self):
         while not self._stop.is_set():
@@ -323,3 +395,6 @@ class Cluster:
 
     def stop(self):
         self._stop.set()
+        if self.cluster_state and self.cluster_state.enabled:
+            try: self.cluster_state.step_down()
+            except Exception: pass

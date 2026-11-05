@@ -9,8 +9,8 @@ from http.cookies import SimpleCookie, CookieError
 from pathlib import Path
 
 USERS_PATH = Path(os.getenv('USERS_PATH', '/data/users.json'))
-DEFAULT_USER = 'admin'
-DEFAULT_PASSWORD = 'ABcd11!!'
+BOOTSTRAP_PASSWORD_PATH = Path(os.getenv('BOOTSTRAP_PASSWORD_PATH', str(USERS_PATH.with_name('initial-admin-password.txt'))))
+DEFAULT_USER = os.getenv('HOMESCAN_ADMIN_USER', 'admin').strip() or 'admin'
 SESSION_COOKIE = 'homescan_session'
 SESSION_HOURS = 12
 REMEMBER_DAYS = 30
@@ -18,6 +18,7 @@ PBKDF2_ROUNDS = 260000
 
 _lock = threading.RLock()
 _sessions = {}  # token -> dict(username, expires, remember)
+_bootstrap_password = None
 
 
 def now():
@@ -61,13 +62,40 @@ def _save_users(users):
     tmp.replace(USERS_PATH)
 
 
+def bootstrap_password():
+    """Password created on first boot (env override or generated). Cleared after users exist."""
+    return _bootstrap_password
+
+
 def init():
-    """Ensure the default admin account exists when no users are configured."""
+    """Create the initial admin account when no users are configured.
+
+    Password order: HOMESCAN_ADMIN_PASSWORD env, else a generated secret written once to
+    initial-admin-password.txt so shared installs never ship a known default password.
+    """
+    global _bootstrap_password
     with _lock:
         users = _load_users()
         if not users:
-            users[DEFAULT_USER] = _hash_password(DEFAULT_PASSWORD)
+            password = os.getenv('HOMESCAN_ADMIN_PASSWORD', '').strip()
+            generated = False
+            if not password:
+                password = secrets.token_urlsafe(18)
+                generated = True
+            users[DEFAULT_USER] = _hash_password(password)
             _save_users(users)
+            _bootstrap_password = password
+            if generated:
+                try:
+                    BOOTSTRAP_PASSWORD_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    BOOTSTRAP_PASSWORD_PATH.write_text(password + '\n')
+                    BOOTSTRAP_PASSWORD_PATH.chmod(0o600)
+                except OSError:
+                    pass
+            print('HomeScan admin user {!r} created. {}'.format(
+                DEFAULT_USER,
+                'Password saved to '+str(BOOTSTRAP_PASSWORD_PATH) if generated else 'Password taken from HOMESCAN_ADMIN_PASSWORD.',
+            ), flush=True)
         _purge_sessions()
 
 

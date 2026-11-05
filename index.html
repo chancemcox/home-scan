@@ -17,7 +17,7 @@
 <footer><span id="meta"></span><p>Devices are identified by MAC address. IP-only discoveries need a MAC before Cloudflare sync can be enabled.</p></footer>
 </main>
 <dialog id="device-dialog"><form id="device-form"><div class="dialog-head"><div><small class="eyebrow">DEVICE SETTINGS</small><h2 id="device-title">Cloudflare sync</h2></div><button type="button" class="close" data-close="device-dialog" aria-label="Close device settings">×</button></div><p id="device-identity" class="mono"></p><p id="device-current"></p>
-<fieldset><legend><label class="toggle"><input id="local-enabled" type="checkbox">Local DNS sync</label></legend><p>Resolve this hostname directly to the device’s private LAN IP.</p><label for="local-host">Hostname</label><div class="hostname-input"><input id="local-host" placeholder="nas" autocomplete="off"><span>.house.chancecox.com</span></div><small>DNS only. Reachable from your home network or VPN. DNS does not select a port.</small></fieldset>
+<fieldset><legend><label class="toggle"><input id="local-enabled" type="checkbox">Local DNS sync</label></legend><p>Resolve this hostname directly to the device’s private LAN IP.</p><label for="local-host">Hostname</label><div class="hostname-input"><input id="local-host" placeholder="nas" autocomplete="off"><span class="dns-suffix-label"></span></div><small>DNS only. Reachable from your home network or VPN. Set the base domain in Settings.</small></fieldset>
 <fieldset><legend><label class="toggle"><input id="tunnel-enabled" type="checkbox">Cloudflare Tunnel</label></legend><p>Publish this web service through a Cloudflare tunnel.</p><label for="tunnel-host">Hostname</label><input id="tunnel-host" placeholder="nas-web or app.example.com" autocomplete="off"><div class="split"><div><label for="tunnel-protocol">Service protocol</label><select id="tunnel-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div><div><label for="tunnel-port">Service port</label><input id="tunnel-port" type="number" min="1" max="65535" value="80"></div></div><small id="tunnel-host-hint">Short labels use the base domain from Settings. Full names can use any Cloudflare domain this token can edit. Matching certificate coverage is required for HTTPS.</small></fieldset>
 <p class="hint">Both modes can be enabled using different hostnames. Turning a mode off removes its HomeScan-managed DNS record and tunnel route.</p><p id="form-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" data-close="device-dialog">Cancel</button><button id="save-button" class="primary" type="submit">Save settings</button></div></form></dialog>
 <dialog id="connection-dialog">
@@ -27,7 +27,7 @@
 <h3>1. Sign in and create your token</h3>
 <p><a class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in &amp; create token ↗</a></p>
 <p>Opens Cloudflare in a new tab. Sign in, then choose <strong>Create Token → Create Custom Token</strong>. Name it <strong>HomeScan</strong> and add these permissions:</p>
-<ul class="setup-permissions"><li><strong>Zone → Zone → Read</strong></li><li><strong>Zone → DNS → Edit</strong></li><li><strong>Account → Cloudflare Tunnel → Edit</strong> for tunnels</li></ul>
+<ul class="setup-permissions"><li><strong>Zone → Zone → Read</strong></li><li><strong>Zone → DNS → Edit</strong></li><li><strong>Account → Cloudflare Tunnel → Edit</strong> for tunnels</li><li><strong>Account → D1 → Edit</strong> for the shared HA database</li></ul>
 <p>Limit Zone Resources to the domains you want HomeScan to manage (or include all zones in the account). Select <strong>Continue to summary → Create Token</strong>, then copy the token.</p>
 <h3>2. Save the token in HomeScan</h3>
 <label for="cf-token">API token</label>
@@ -36,6 +36,10 @@
 <fieldset>
 <legend><label class="toggle"><input id="cf-tunnel" type="checkbox" checked>Create / refresh HomeScan tunnel</label></legend>
 <p>Creates the dedicated HomeScan tunnel when missing and refreshes the connector token. Uncheck for local DNS only.</p>
+</fieldset>
+<fieldset>
+<legend><label class="toggle"><input id="cf-d1" type="checkbox" checked>Shared Cloudflare D1 database</label></legend>
+<p>Stores inventory and Cloudflare route state in a shared <strong>homescan</strong> D1 database so every HA node sees the same data. Leave enabled for active/standby clusters.</p>
 </fieldset>
 <p id="connection-error" class="error" role="alert"></p>
 <p class="hint">After enabling the tunnel, keep the cloudflared container running with <code>docker compose --profile cloudflare up -d</code>. The PowerShell setup script still works as an alternative.</p>
@@ -51,8 +55,8 @@
 <fieldset>
 <legend>DNS base domain</legend>
 <label for="dns-suffix">Base domain</label>
-<input id="dns-suffix" placeholder="house.chancecox.com" autocomplete="off" required>
-<small>Used for local DNS sync and as the default for short tunnel hostnames. Tunnel routes can still use any other Cloudflare domain this token can edit.</small>
+<input id="dns-suffix" placeholder="lan.example.com" autocomplete="off" required>
+<small>Your DNS base domain for local sync and short tunnel labels. Tunnel routes can still use any Cloudflare domain this token can edit.</small>
 </fieldset>
 <fieldset>
 <legend><label class="toggle"><input id="deco-enabled" type="checkbox">Deco support</label></legend>

@@ -2,7 +2,7 @@
 const $=id=>document.getElementById(id);
 let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},haState={enabled:false,role:'',scanning:true},selected=null,editingTunnel=null,editingTunnelDetail=null,tunnelInventory=[],zoneInventory=[];
 let sortKey='hostname',sortDir=1;
-let suffix='.house.chancecox.com';
+let suffix='';
 let socket=null,reconnectTimer=0,pollTimer=0,haveData=false,live=false,backoff=2000,refreshing=false;
 const statusRank={seen:0,unknown:1,not_seen:2};
 function cell(row,text,cls){const td=document.createElement('td');td.textContent=text;if(cls)td.className=cls;row.append(td);return td}
@@ -166,7 +166,7 @@ function updateDecoFields(){
  $('deco-host').required=on;
 }
 function openSettings(){
- $('dns-suffix').value=(cf.suffix||'house.chancecox.com');
+ $('dns-suffix').value=(cf.suffix||'');
  $('deco-enabled').checked=!!decoState.enabled;
  $('deco-host').value=decoState.host||'';
  $('deco-username').value=decoState.username||'admin';
@@ -184,7 +184,8 @@ $('settings-form').addEventListener('submit',async event=>{
  try{
   const domain=await post('/api/cloudflare/domain',{suffix:$('dns-suffix').value.trim()});
   cf.suffix=domain.suffix||$('dns-suffix').value.trim();
-  if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span'))el.textContent=suffix}
+  if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
+  else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set base domain)'}
   const body={enabled:$('deco-enabled').checked,host:$('deco-host').value.trim(),username:$('deco-username').value.trim()||'admin'};
   const password=$('deco-password').value;
   if(password)body.password=password;
@@ -219,6 +220,7 @@ function openConnection(){
  $('cf-token').required=!cf.configured;
  $('cf-token-hint').textContent=cf.configured?'A token is already saved. Paste a new one only when rotating credentials.':'The token is stored only on this HomeScan host and is never shown again.';
  $('cf-tunnel').checked=cf.configured?!!cf.tunnel_configured:true;
+ $('cf-d1').checked=cf.configured?!!(cf.d1_database_id||cf.database?.shared):true;
  $('connection-error').textContent='';
  $('connection-dialog').showModal();
 }
@@ -226,11 +228,12 @@ $('connection-button').addEventListener('click',openConnection);
 $('connection-form').addEventListener('submit',async event=>{
  event.preventDefault();$('connection-save').disabled=true;$('connection-error').textContent='';
  try{
-  const body={tunnel:$('cf-tunnel').checked};
+  const body={tunnel:$('cf-tunnel').checked,d1:$('cf-d1').checked};
   const token=$('cf-token').value.trim();
   if(token)body.api_token=token;
   const result=await post('/api/cloudflare/connect',body);
   cf.configured=!!result.configured;cf.zone=result.zone||cf.zone;cf.tunnel_configured=!!result.tunnel_configured;
+  cf.d1_database_id=result.d1_database_id||cf.d1_database_id;cf.database=result.database||cf.database||{shared:!!result.database_shared};
   applyStatus();$('connection-dialog').close();await refresh();await loadTunnels();
  }catch(e){$('connection-error').textContent=e.message}
  finally{$('connection-save').disabled=false}
@@ -249,7 +252,8 @@ $('filter-status').addEventListener('change',render);
 $('filter-cloudflare').addEventListener('change',render);
 for(const button of document.querySelectorAll('button.sort'))button.addEventListener('click',()=>{if(sortKey===button.dataset.sort)sortDir*=-1;else{sortKey=button.dataset.sort;sortDir=1}render()});
 function applyStatus(){
- $('cloud-state').textContent=cf.configured?'Cloudflare connected · '+cf.zone:'Cloudflare not connected · Configure devices, then connect your account';
+ const dbLabel=cf.database?.kind==='d1'||cf.d1_database_id?' · shared D1':'';
+ $('cloud-state').textContent=cf.configured?'Cloudflare connected · '+cf.zone+dbLabel:'Cloudflare not connected · Configure devices, then connect your account';
  $('sync-button').disabled=!cf.configured;
  if(!decoState.configured)$('deco-state').textContent='Deco: not configured';
  else if(!decoState.enabled)$('deco-state').textContent='Deco: off';
@@ -267,7 +271,8 @@ function apply(j){
  if(!j||!Array.isArray(j.devices)||!j.cloudflare||!Array.isArray(j.cloudflare.routes))return;
  haveData=true;backoff=2000;
  data=j.devices;cf=j.cloudflare;decoState=j.deco||decoState;haState=j.ha||haState;
- if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span'))el.textContent=suffix}
+ if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
+ else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set base domain)'}
  $('total').textContent=data.length;$('online').textContent=data.filter(d=>d.online).length;$('route-count').textContent=cf.routes.filter(r=>r.enabled).length;
  if(haState.enabled&&haState.role==='follower')$('status').textContent='Standby node';
  else $('status').textContent=j.stale?'Awaiting scanner':'● Scanner active';

@@ -8,9 +8,12 @@ services:
       SCAN_MODE: agent
       INGEST_TOKEN: ${INGEST_TOKEN:?Set INGEST_TOKEN in .env}
       HA_ENABLED: ${HA_ENABLED:-1}
-      HA_HOSTNAME: ${HA_HOSTNAME:-homescan.house.chancecox.com}
+      HA_HOSTNAME: ${HA_HOSTNAME:-}
       HA_PORT: ${HA_PORT:-8080}
       HA_LOCAL_IP: ${HA_LOCAL_IP:?Set HA_LOCAL_IP to this host's LAN IP}
+      CLUSTER_WORKER_URL: ${CLUSTER_WORKER_URL:-}
+      CLUSTER_SECRET: ${CLUSTER_SECRET:-}
+      HOMESCAN_ADMIN_PASSWORD: ${HOMESCAN_ADMIN_PASSWORD:-}
     volumes:
       - homescan-data:/data
       - ./.secrets:/run/homescan-secrets:ro

@@ -11,10 +11,10 @@ import urllib.request
 import uuid
 from pathlib import Path
 import storage
+from d1 import ensure_database, D1Error
 
-DEFAULT_SUFFIX = 'house.chancecox.com'
-SUFFIX = DEFAULT_SUFFIX  # compatibility alias; prefer Manager.suffix() / normalize_suffix()
-OLD_SUFFIX = 'local.chancecox.com'
+# Base DNS domain is configured per install (Settings / Cloudflare setup). No personal default.
+OLD_SUFFIXES = tuple(s for s in os.getenv('HOMESCAN_OLD_SUFFIXES', '').split(',') if s.strip())
 LABEL_RE = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
 CONFIG = Path(os.getenv('CLOUDFLARE_CONFIG','/data/cloudflare.json'))
 TOKEN_FILE = Path(os.getenv('CLOUDFLARE_TUNNEL_TOKEN','/run/homescan-tunnel/token'))
@@ -70,22 +70,28 @@ def hostname(value, suffix=None, kind='local'):
     Local DNS must be a single label under the configured base domain.
     Tunnel hostnames may be that short form or any full hostname on a Cloudflare zone.
     """
-    suffix = normalize_suffix(suffix or DEFAULT_SUFFIX)
+    configured = ''
+    if suffix not in (None, ''):
+        configured = normalize_suffix(suffix)
     name = _parse_hostname_input(value)
     if not name:
         raise ValueError('Enter a hostname.')
     if '.' not in name:
-        name += '.'+suffix
+        if not configured:
+            raise ValueError('Set a base domain in Settings, or enter a full hostname.')
+        name += '.'+configured
     parts = name.split('.')
     if not all(LABEL_RE.fullmatch(p) for p in parts):
         raise ValueError('Hostnames may only use letters, numbers, and hyphens.')
     if kind == 'tunnel':
         if len(parts) < 2:
-            raise ValueError('Enter a full hostname on a Cloudflare domain, or a short label under '+suffix)
+            raise ValueError('Enter a full hostname on a Cloudflare domain, or a short label under your base domain.')
         return name
-    label = name.removesuffix('.'+suffix)
-    if name != label+'.'+suffix or not LABEL_RE.fullmatch(label) or '.' in label:
-        raise ValueError('Use a single hostname such as nas.'+suffix)
+    if not configured:
+        raise ValueError('Set a base domain in Settings before enabling local DNS.')
+    label = name.removesuffix('.'+configured)
+    if name != label+'.'+configured or not LABEL_RE.fullmatch(label) or '.' in label:
+        raise ValueError('Use a single hostname such as nas.'+configured)
     return name
 
 
@@ -143,14 +149,24 @@ class Manager:
                 state TEXT NOT NULL DEFAULT 'pending', message TEXT NOT NULL DEFAULT '', synced_ip TEXT,
                 last_checked TEXT, UNIQUE(tunnel_id,hostname,path));
             ''')
-            # Rewrite managed hostnames after the global suffix change; leave cf_resources
-            # on the old names so reconcile deletes prior DNS/tunnel ownership.
-            for row in db.execute('SELECT id,hostname,enabled FROM cf_routes WHERE hostname LIKE ?',
-                                  ('%.'+OLD_SUFFIX,)):
-                new = row['hostname'].removesuffix('.'+OLD_SUFFIX)+'.'+SUFFIX
-                db.execute('''UPDATE cf_routes SET hostname=?,
-                    state=CASE WHEN enabled=1 THEN 'pending' ELSE state END, message='' WHERE id=?''',
-                           (new, row['id']))
+            # Optional one-time rewrite when HOMESCAN_OLD_SUFFIXES and a new suffix are set.
+            new_suffix = ''
+            try:
+                cfg = json.loads(self.config_path.read_text()) if self.config_path.exists() else {}
+                new_suffix = normalize_suffix(cfg['suffix']) if cfg.get('suffix') else ''
+            except (OSError, ValueError):
+                new_suffix = ''
+            if new_suffix:
+                for old_suffix in OLD_SUFFIXES:
+                    old_suffix = old_suffix.strip().lower().rstrip('.')
+                    if not old_suffix or old_suffix == new_suffix:
+                        continue
+                    for row in db.execute('SELECT id,hostname,enabled FROM cf_routes WHERE hostname LIKE ?',
+                                          ('%.'+old_suffix,)):
+                        new = row['hostname'].removesuffix('.'+old_suffix)+'.'+new_suffix
+                        db.execute('''UPDATE cf_routes SET hostname=?,
+                            state=CASE WHEN enabled=1 THEN 'pending' ELSE state END, message='' WHERE id=?''',
+                                   (new, row['id']))
 
     def config(self):
         try: return json.loads(self.config_path.read_text())
@@ -159,8 +175,11 @@ class Manager:
     def suffix(self):
         try: cfg = self.config()
         except (ValueError, OSError): cfg = {}
-        try: return normalize_suffix(cfg.get('suffix') or DEFAULT_SUFFIX)
-        except ValueError: return DEFAULT_SUFFIX
+        raw = cfg.get('suffix') or ''
+        if not raw:
+            return ''
+        try: return normalize_suffix(raw)
+        except ValueError: return ''
 
     def save_domain(self, body):
         """Persist the dashboard base domain used for local DNS and short tunnel labels."""
@@ -178,9 +197,12 @@ class Manager:
         with storage.connect(self.db_path) as db:
             routes = [dict(r) for r in db.execute('SELECT * FROM cf_routes')]
             links = [dict(r) for r in db.execute('SELECT * FROM cf_tunnel_links')]
+        db_state = storage.backend_state()
         return dict(configured=bool(cfg.get('api_token')),zone=cfg.get('zone_name'),
                     tunnel_id=cfg.get('tunnel_id') or '',
-                    tunnel_configured=bool(cfg.get('tunnel_id')),suffix=self.suffix(),routes=routes,tunnel_links=links)
+                    tunnel_configured=bool(cfg.get('tunnel_id')),suffix=self.suffix(),routes=routes,tunnel_links=links,
+                    d1_database_id=cfg.get('d1_database_id') or '',
+                    database=db_state)
 
     def list_tunnels(self):
         """Account tunnel inventory for the settings UI. Soft-fails without raising."""
@@ -587,8 +609,12 @@ class Manager:
         """Create or point the cluster A record at this node's private LAN IP."""
         ip = private_ip(ip)
         suffix = self.suffix()
-        name = str(hostname or ('homescan.'+suffix)).strip().lower().rstrip('.')
-        if not name.endswith('.'+suffix) or name.count('.') < 3:
+        name = str(hostname or '').strip().lower().rstrip('.')
+        if not name and suffix:
+            name = 'homescan.'+suffix
+        if not name:
+            raise ValueError('Set HA_HOSTNAME or a base domain before updating cluster DNS.')
+        if suffix and not name.endswith('.'+suffix):
             raise ValueError('HA hostname must be under '+suffix)
         with self.lock:
             try: cfg = self.config()
@@ -745,17 +771,20 @@ def connect_cloudflare(options, config_path=CONFIG, api_factory=API, token_file=
     if len(token) < 20: raise ValueError('Enter a Cloudflare API token.')
     want_tunnel = options.get('tunnel', True)
     if not isinstance(want_tunnel, bool): raise ValueError('Invalid tunnel option.')
+    want_d1 = options.get('d1', True)
+    if not isinstance(want_d1, bool): raise ValueError('Invalid D1 option.')
     if options.get('suffix') not in (None, ''):
         suffix = normalize_suffix(options.get('suffix'))
+    elif old.get('suffix'):
+        suffix = normalize_suffix(old.get('suffix'))
     else:
-        try: suffix = normalize_suffix(old.get('suffix') or DEFAULT_SUFFIX)
-        except ValueError: suffix = DEFAULT_SUFFIX
+        suffix = ''
     api = api_factory(token)
     zone = None
     preferred = str(options.get('zone_name') or old.get('zone_name') or '').strip().lower().rstrip('.')
     candidates = []
     if preferred: candidates.append(preferred)
-    candidates.extend(zone_candidates_for_suffix(suffix))
+    if suffix: candidates.extend(zone_candidates_for_suffix(suffix))
     seen = set()
     for name in candidates:
         if name in seen: continue
@@ -765,20 +794,37 @@ def connect_cloudflare(options, config_path=CONFIG, api_factory=API, token_file=
             zone = zones[0]
             break
     if not zone:
-        # Fall back to any active zone the token can see so non-default domains work.
+        # Use any active zone the token can see so installs are not tied to one domain.
         zones = api.call('GET', '/zones?'+urllib.parse.urlencode({'status':'active','per_page':100})) or []
         if len(zones) == 1:
             zone = zones[0]
         elif preferred:
             exact = [z for z in zones if z.get('name') == preferred]
             zone = exact[0] if exact else None
+        elif zones:
+            zones = sorted(zones, key=lambda z: z.get('name') or '')
+            zone = zones[0]
     if not zone:
-        raise CloudflareError('The token cannot access an active Cloudflare zone for '+suffix+'. Grant Zone Read and DNS Edit for that domain.')
+        raise CloudflareError('The token cannot access an active Cloudflare zone. Grant Zone Read and DNS Edit for your domain.')
     if old.get('zone_id') and old['zone_id'] != zone['id']:
         raise CloudflareError('Zone changed. Keep the original zone while HomeScan manages existing records.')
+    if not suffix:
+        # Default the base domain to the connected zone until Settings overrides it.
+        suffix = normalize_suffix(zone['name'])
     cfg = dict(old, api_token=token, zone_id=zone['id'], zone_name=zone['name'], account_id=zone['account']['id'], suffix=suffix)
     # Store the installation identity before creating anything, so setup retries reuse its tunnel.
     cfg.setdefault('installation_id', uuid.uuid4().hex)
+    if want_d1:
+        try:
+            cfg['d1_database_id'] = ensure_database(api, cfg['account_id'], 'homescan')
+        except D1Error as exc:
+            raise CloudflareError(str(exc)) from None
+        except CloudflareError:
+            raise
+        except Exception:
+            raise CloudflareError('Could not create or open the shared Cloudflare D1 database. Grant Account D1 Edit.') from None
+    else:
+        cfg.pop('d1_database_id', None)
     atomic_json(config_path, cfg)
     if want_tunnel:
         base = f"/accounts/{cfg['account_id']}/cfd_tunnel"
@@ -797,7 +843,8 @@ def connect_cloudflare(options, config_path=CONFIG, api_factory=API, token_file=
         temp.write_text(tunnel_token)
         temp.chmod(0o644)  # The connector's non-root user reads this dedicated volume.
         temp.replace(token_file)
-    return dict(configured=True, zone=cfg['zone_name'], tunnel_configured=bool(cfg.get('tunnel_id')))
+    return dict(configured=True, zone=cfg['zone_name'], tunnel_configured=bool(cfg.get('tunnel_id')),
+                d1_database_id=cfg.get('d1_database_id') or '', database_shared=bool(cfg.get('d1_database_id')))
 
 
 def setup(options):

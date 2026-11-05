@@ -1,117 +1,92 @@
 # HomeScan
 
-HomeScan inventories home-network devices every minute, stores observations in SQLite, and serves a searchable dashboard at http://192.168.2.100:8080. Pi-hole retains port 80. The Docker app listens on container port 80, published as host port 8080.
+HomeScan inventories home-network devices, stores observations, and serves a searchable dashboard. Publish the app on host port **8080** by default (`compose.yaml`). Configure domains, credentials, and cluster settings for **your** network — nothing personal is baked into the code.
+
+Copy `.env.example` to `.env` and fill in values before `docker compose up`.
+
+## First login
+
+On first boot HomeScan creates an `admin` user:
+
+1. Set `HOMESCAN_ADMIN_PASSWORD` in `.env`, **or**
+2. Read the generated password from `/data/initial-admin-password.txt` inside the app volume / container.
+
+There is no shared default password in the image.
 
 ## Device identity and status
 
-MAC addresses are the unique identity. When the same MAC receives a different IP, its inventory entry and Cloudflare settings follow the new address. Separate network interfaces or randomized MACs are separate identities. An entry without a MAC is provisional and cannot enable Cloudflare sync. If a different MAC takes an old IP, it does not inherit the previous device's settings.
+MAC addresses are the unique identity. When the same MAC receives a different IP, its inventory entry and Cloudflare settings follow the new address. Entries without a MAC are provisional and cannot enable Cloudflare sync.
 
-Network and Deco observations have separate presence states. A successful fresh observation shows Seen. A successful check that omits a device shows Not seen. Stale or unavailable checks show Status unavailable. Deco connection failures are silently skipped; saved devices and their original last-seen timestamps remain intact. Authentication failures retain a silent ten-minute cooldown; connection failures retry on the next scan.
+Network and Deco observations have separate presence states. Deco connection failures are skipped silently; authentication failures use a short cooldown.
 
-The existing SQLite inventory is migrated automatically from IP keys to MAC keys. Historical sightings remain available in the database; detailed observations are retained for 30 days and the device inventory indefinitely. A database backup was created in the data volume before the MAC migration (`homescan.db.before-mac-cloudflare-*.bak`).
+## Shared state options
+
+- **Local SQLite** (`/data/homescan.db`) — default single-node store.
+- **Cloudflare D1** — optional shared SQL database named `homescan` for multi-node HA (enable in Cloudflare setup; needs Account → D1 → Edit).
+- **Durable Object cluster worker** (`worker/`) — optional Cloudflare in-memory coordinator for leader election and live inventory fan-out. Deploy with Wrangler, then set `CLUSTER_WORKER_URL` and `CLUSTER_SECRET`.
 
 ## Cloudflare per-device settings
 
-Click **Configure** on a device with a known MAC address:
+Set your **base domain** under **Settings** (also set automatically from the zone you connect). Then use **Configure** on a device with a known MAC:
 
-- **Local DNS sync** creates a DNS-only A record, for example `nas.house.chancecox.com -> 192.168.2.20`. It resolves to the private IP and needs LAN/VPN connectivity. DNS does not specify a service port. Use `http://nas.house.chancecox.com:8080` if the service requires port 8080.
-- **Cloudflare Tunnel** publishes an HTTP or HTTPS service on a selectable origin port, for example `nas-web.house.chancecox.com -> http://192.168.2.20:8080`. The DNS record is a proxied CNAME to the dedicated HomeScan tunnel. When the IP changes, the tunnel's origin address changes; the CNAME remains pointed at the tunnel.
-- Both can be enabled with **different hostnames**. One hostname cannot simultaneously be a private A record and a tunnel CNAME.
-- Local DNS hostnames must be a single label below the configured base domain (default `house.chancecox.com`, changeable in **Settings**). Tunnel hostnames may use that short form or any full hostname on a Cloudflare zone the API token can edit. A wildcard record is not created.
-- Disabling a mode removes its HomeScan-managed DNS record and tunnel rule. Renaming removes the previous managed hostname. Unrelated DNS records or tunnel rules are not overwritten; conflicting hostnames show a descriptive error.
-
-After each complete scan, a background worker reads the actual Cloudflare records and tunnel config. It writes only when the destination or settings differ, so it also repairs manual drift in HomeScan-owned records. Failed updates retry automatically and do not block network scanning. **Sync now** queues an immediate reconciliation. Unknown/stale devices retain their last confirmed address; if another MAC is observed taking that IP, their published mappings are removed until their own MAC gets a confirmed address.
-
-Settings can be saved before connecting Cloudflare; they remain pending. The dashboard's Config synced state means the Cloudflare configuration matches, not that the destination service or public HTTPS certificate has been tested.
+- **Local DNS sync** — DNS-only A record under your base domain (for example `nas.lan.example.com` → private IP).
+- **Cloudflare Tunnel** — short label under the base domain, or any full hostname on a zone the token can edit.
+- Both modes need different hostnames when enabled together.
 
 ### Connect the account
 
-Create a Cloudflare API token with:
-
-- Zone / Zone / Read, scoped to `chancecox.com` (or a separately managed `house.chancecox.com` zone).
-- Zone / DNS / Edit for that zone.
-- Account / Cloudflare Tunnel / Edit for the zone's account, if using tunnels.
-
-Paste the token in the dashboard under **Cloudflare setup**, or run the PowerShell helper on this PC:
+Create a Cloudflare API token with Zone Read, DNS Edit, Tunnel Edit (optional), and D1 Edit (optional). Paste it under **Cloudflare setup**, or run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\homeScan\configure-cloudflare.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\configure-cloudflare.ps1 [-Suffix lan.example.com]
 ```
 
-Either path discovers the zone and account IDs, can create a dedicated remotely managed HomeScan tunnel, and stores the connector token in a dedicated Docker volume. After enabling the tunnel from the dashboard, start the optional connector with `docker compose --profile cloudflare up -d`. The PowerShell script starts cloudflared for you. It does not modify the existing Paperless tunnel. Re-running setup reuses the HomeScan tunnel. For DNS only, uncheck the tunnel option in the dashboard or add `-LocalDnsOnly` to the script; an existing HomeScan tunnel is not removed by that option.
+Tokens and tunnel connector secrets stay in Docker volumes, not in Git.
 
-The API token is stored in `/data/cloudflare.json` with owner-only file permissions, not in the Docker image, command-line arguments, or Git. The connector token is in the `homescan-tunnel` volume, mounted read-only by cloudflared. Protect volume backups because the data volume includes credentials. The dashboard requires a local login (default `admin` / `ABcd11!!`, hashed in `/data/users.json`). Sessions use an HttpOnly cookie; check **Remember me** for a 30-day cookie, otherwise the session lasts about 12 hours. Change the default password promptly. Write endpoints still reject cross-origin browser requests. The Cloudflare token is never returned to the browser after save.
+## Cluster failover
 
-The Cloudflare tunnels table can edit the name and complete JSON ingress configuration of remotely managed tunnels. Locally managed tunnels are shown read-only. HomeScan-owned device ingress rules are protected from the general tunnel editor and must be changed through that device's **Configure** dialog, which keeps MAC/IP synchronization intact.
+Set per host in `.env`:
 
-An existing remotely managed ingress rule can also be linked to any inventoried computer with a MAC address. On every scan HomeScan resolves that MAC's current private IPv4 address and updates only the hostname portion of the rule's origin service, preserving its protocol, port, path, query, and fragment. A missing/stale MAC or an unavailable Cloudflare API leaves the last known route intact and reports a waiting/error state for automatic retry.
+- `HA_LOCAL_IP` — this machine’s LAN IP (required under Docker)
+- `HA_HOSTNAME` — shared name scanners use (or leave empty to use `homescan.<base-domain>` once Settings has a domain)
+- Optional: `HA_ENABLED`, `HA_PORT`, `CLUSTER_WORKER_URL`, `CLUSTER_SECRET`
 
-The tunnel inventory shows public hostnames and origin services for every remotely managed tunnel visible to the token. **Edit** provides a numeric port control and **Delete** for each public hostname, plus the advanced JSON editor. **Delete** on a tunnel row removes that remotely managed Cloudflare tunnel (not the dedicated HomeScan tunnel) and best-effort cleans matching CNAMEs. **Create tunnel hostname** / **Add hostname** can add another proxied CNAME and ingress rule on any accessible active zone, select its tunnel, computer, protocol, and port, and automatically creates the MAC link—repeat this to put multiple public hostnames on the same computer. To use multiple domains, the Cloudflare token must have Zone Read and DNS Edit access to each zone; zones outside the token's scope are intentionally not shown.
-
-The tunnel publishes the selected service to the Internet. Use the service's authentication or configure Cloudflare Access. For HTTPS names like `nas-web.house.chancecox.com`, a standard Universal SSL certificate on the `chancecox.com` zone does not cover that depth. Configure an appropriate edge certificate (for example Advanced Certificate Manager / Total TLS). No certificate purchases or account-plan changes are made by HomeScan. Local DNS-only HTTPS is handled by the local service's own certificate.
-
-Cloudflare references:
-- https://developers.cloudflare.com/tunnel/get-started/
-- https://developers.cloudflare.com/dns/proxy-status/
-- https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/
-
-## Cluster failover (active / standby)
-
-Multiple HomeScan hosts can share `homescan.house.chancecox.com`. Exactly one node is **active**:
-
-1. Every node resolves that hostname and opens a WebSocket to `ws://homescan.house.chancecox.com:8080/ha`.
-2. The active node publishes heartbeats and accepts scanner ingest (`POST /api/scan`).
-3. If heartbeats stop, a standby claims the Cloudflare local A record for `homescan.house.chancecox.com`, points it at its own LAN IP, and becomes active.
-4. If the DNS name does not exist yet, the first node creates the A record for itself.
-
-Set `HA_LOCAL_IP` in `.env` to each host’s LAN address (required under Docker). Optional: `HA_ENABLED`, `HA_HOSTNAME`, `HA_PORT`, `HA_HEARTBEAT`, `HA_TIMEOUT`. Standby nodes still serve the dashboard read-only for inventory on their local disk; point browsers and `scanner.ps1` at the shared hostname so traffic follows the active node.
+With a Durable Object worker configured, leadership is leased there. DNS for `HA_HOSTNAME` still points browsers/scanners at the active node.
 
 ## Windows scanning
 
-Docker Desktop cannot do physical LAN ARP discovery. `scanner.ps1` runs natively and submits observations to Docker. The **HomeScan Scanner** scheduled task runs at sign-in and scans `192.168.2.0/24,192.168.1.0/24` every minute. It pings targets, reads Windows neighbors, tries reverse DNS, and merges the Deco inventory. Windows neighbor caching means presence is approximate. Routed devices may have no MAC until reported by Deco.
-
 ```powershell
 docker compose up -d --build
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\homeScan\scanner.ps1 -Subnet 192.168.2.0/24,192.168.1.0/24
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scanner.ps1 -Subnet 192.168.1.0/24
 ```
 
-By default the scanner posts to `http://homescan.house.chancecox.com:8080` so only the active cluster node records the scan. Use `-Server http://localhost:8080` for a single-node diagnostic. The ingestion secret is loaded from `.env`; keep this file local. Windows Firewall rule **HomeScan HTTP 8080** permits TCP 8080 from the local subnet.
+Default ingest URL is `http://127.0.0.1:8080`, or set `HOMESCAN_SERVER` / `-Server` to your cluster hostname.
 
 ### Deco
 
-The main Deco is an X10 at `192.168.86.233`, firmware 1.4.0. The read-only importer uses `tplink-deco-api==2.1.0`. Turn Deco support on or off and set the owner password from **Settings** in the dashboard, or locally:
+Optional TP-Link Deco import is configured in **Settings** (or `configure-deco.ps1`). Credentials live in `/data/deco.json`.
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\homeScan\configure-deco.ps1
-```
+## Linux all-in-one
 
-Credentials are saved in `/data/deco.json` inside the app volume (owner-only permissions). Online clients with usable IPv4 addresses are imported across any subnet. Connection and authentication failures are skipped and never block network scanning or mark fresh network observations unavailable. The reader tolerates complete JSON responses with a missing final HTTP chunk and rejects genuinely truncated JSON.
-
-## Linux all-in-one scanner
-
-On a Linux host directly attached to the subnet, set `SCAN_NETWORK` in `.env` and run:
-
-```sh
+```bash
 docker compose -f compose.linux.yaml up -d --build
 ```
 
-This mode runs Nmap host discovery with host networking every 60 seconds, times out after 50 seconds, and serves the dashboard on host port 80. MAC discovery works for directly connected subnets. The Cloudflare worker is also available in this deployment; the optional connector uses the same `cloudflare` profile. Account setup can be invoked inside the app container with `cloudflare_sync.py setup` and a JSON object on stdin containing `api_token` and `tunnel`.
+Uses host networking and Nmap. Set `SCAN_NETWORK` for your subnet.
 
-## Operations and checks
+## Durable Object worker
 
-- `docker compose logs -f homescan` — app logs.
-- `docker compose --profile cloudflare logs -f cloudflared` — connector logs.
-- `docker compose down` preserves named volumes; adding `-v` deletes data and credentials.
-- SQLite: `/data/homescan.db` in `homescan-data`. Stop the app or use SQLite's backup API for a consistent copy.
-- Read API: `/health`, `/api/devices`, `/api/cloudflare`.
-- Scanner ingestion: authenticated `POST /api/scan`.
-- Dashboard settings: same-origin JSON `POST /api/cloudflare/settings`, `/api/cloudflare/sync`.
-- Tests: `test_cloudflare.py`, `test_app.py`, `test_ws.py`, `test_storage.py`, `test_status.py`, `test_deco.py` (Cloudflare connect/delete/tunnels, HTTP API, WebSocket keepalive, storage identity, Deco, status).
-
-Example test command in PowerShell:
-
-```powershell
-docker run --rm -v ${PWD}:/app -w /app python:3.14-slim python -m unittest discover -v
+```bash
+cd worker
+npm install
+npx wrangler secret put CLUSTER_SECRET
+npx wrangler deploy
 ```
 
-Cloudflare reconciliation is tested against a simulated API. Live DNS and tunnel verification requires account setup and a selected hostname/service. Browser testing covered the per-device settings, hostname conflicts, mobile layout, preserving settings across DHCP changes, and request authentication checks.
+Put the resulting `https://<worker>.workers.dev` URL and the same secret into `.env` as `CLUSTER_WORKER_URL` / `CLUSTER_SECRET` on every HomeScan node.
+
+## Operations
+
+- `docker compose logs -f homescan`
+- `docker compose --profile cloudflare logs -f cloudflared`
+- Named volumes keep data across `docker compose down` (add `-v` to wipe)

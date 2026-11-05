@@ -49,6 +49,10 @@ class ListingAPI:
             return [dict(self.tunnel)]
         if method == 'GET' and path.endswith('/token'):
             return 'connector-token'
+        if method == 'GET' and path.endswith('/d1/database'):
+            return [{'uuid': 'd1-homescan-id', 'name': 'homescan'}]
+        if method == 'POST' and path.endswith('/d1/database'):
+            return {'uuid': 'd1-homescan-id', 'name': body['name']}
         raise AssertionError((method, path, body))
 
 
@@ -73,7 +77,9 @@ class AppServerTests(unittest.TestCase):
         import app as app_module
         cls.auth = auth
         auth.USERS_PATH = Path(os.environ['USERS_PATH'])
+        auth.BOOTSTRAP_PASSWORD_PATH = Path(cls.temp.name) / 'initial-admin-password.txt'
         auth._sessions.clear()
+        auth._bootstrap_password = None
         auth.init()
         cls.app = app_module
         cls.app.DB = cls.db
@@ -92,8 +98,14 @@ class AppServerTests(unittest.TestCase):
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base = f'http://127.0.0.1:{cls.server.server_address[1]}'
-        session = auth.login(auth.DEFAULT_USER, auth.DEFAULT_PASSWORD, remember=False)
+        password = auth.bootstrap_password() or os.environ.get('HOMESCAN_ADMIN_PASSWORD')
+        if not password:
+            # auth.init may have run before USERS_PATH was set; seed explicitly.
+            auth.init()
+            password = auth.bootstrap_password()
+        session = auth.login(auth.DEFAULT_USER, password, remember=False)
         cls.cookie = f'{auth.SESSION_COOKIE}={session["token"]}'
+        cls.password = password
 
     @classmethod
     def tearDownClass(cls):
@@ -159,7 +171,7 @@ class AppServerTests(unittest.TestCase):
 
     def test_login_remember_me_and_logout(self):
         code, payload, headers = self.post('/api/login', {
-            'username': 'admin', 'password': self.auth.DEFAULT_PASSWORD, 'remember': True
+            'username': 'admin', 'password': self.password, 'remember': True
         }, auth=False, origin=False)
         self.assertEqual(code, 200)
         self.assertTrue(payload['ok'])
@@ -206,13 +218,16 @@ class AppServerTests(unittest.TestCase):
                 code, payload, _ = self.post('/api/cloudflare/connect', {
                     'api_token': 'rotated-cloudflare-api-token',
                     'tunnel': False,
+                    'd1': False,
                 })
         self.assertEqual(code, 200)
         self.assertTrue(payload['ok'])
         self.assertEqual(payload['zone'], 'chancecox.com')
         saved = json.loads(self.cfg.read_text())
         self.assertEqual(saved['api_token'], 'rotated-cloudflare-api-token')
+        self.assertNotIn('d1_database_id', saved)
         self.assertNotIn('rotated-cloudflare-api-token', json.dumps(self.app.CLOUDFLARE.public_state()))
+        storage.use_sqlite()
 
     def test_scan_ingest_requires_bearer_and_records(self):
         code, payload, _ = self.post('/api/scan', {'hosts': [{'ip': '192.168.2.9', 'mac': '02:AA:BB:CC:DD:EE', 'hostname': 'Phone'}]},
@@ -289,8 +304,10 @@ class FrontendAssetTests(unittest.TestCase):
         self.assertIn('id="ha-state"', html)
         self.assertIn('id="dns-suffix"', html)
         self.assertIn('id="logout-button"', html)
+        self.assertIn('id="cf-d1"', html)
         self.assertIn('/api/cloudflare/connect', js)
         self.assertIn('/api/cloudflare/domain', js)
+        self.assertIn('d1:$(\'cf-d1\').checked', js)
         self.assertIn('Leave blank to keep the current token', js)
         self.assertIn('haState', js)
 

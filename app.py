@@ -1,4 +1,4 @@
-import os, json, threading, time, subprocess, ipaddress, secrets
+import os, json, threading, time, subprocess, ipaddress, secrets, uuid
 import xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -10,6 +10,7 @@ import deco
 import auth
 from ws import Hub
 from ha import Cluster
+from cluster_state import ClusterState
 
 DB = os.getenv('DB_PATH', '/data/homescan.db')
 MODE = os.getenv('SCAN_MODE', 'nmap')
@@ -23,6 +24,18 @@ CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish())
 def now(): return storage.now()
 def connect(): return storage.connect(DB)
 def devices_payload():
+    if not CLUSTER.is_leader():
+        shared = CLUSTER.shared_inventory()
+        if shared:
+            try:
+                result = json.loads(shared)
+                if isinstance(result, dict) and isinstance(result.get('devices'), list):
+                    result['ha'] = CLUSTER.public_state()
+                    result['cloudflare'] = CLOUDFLARE.public_state()
+                    result['deco'] = deco.public_state()
+                    return json.dumps(result)
+            except (TypeError, ValueError):
+                pass
     result = storage.inventory(DB)
     result.update(mode=MODE,network=NETWORK if MODE=='nmap' else 'Home network',
                   cloudflare=CLOUDFLARE.public_state(),deco=deco.public_state(),
@@ -30,19 +43,44 @@ def devices_payload():
     return json.dumps(result)
 
 def publish():
-    HUB.broadcast(devices_payload())
+    payload = devices_payload()
+    HUB.broadcast(payload)
+    CLUSTER.publish_inventory(payload)
+
+def build_cluster_state(cfg, node_id):
+    url = (cfg.get('cluster_worker_url') or os.getenv('CLUSTER_WORKER_URL') or '').strip()
+    secret = (cfg.get('cluster_secret') or os.getenv('CLUSTER_SECRET') or '').strip()
+    if not url or not secret:
+        return None
+    return ClusterState(url, secret, node_id or uuid.uuid4().hex)
+
+def apply_database_backend(cfg=None):
+    """Prefer shared Cloudflare D1 when configured so HA nodes share inventory."""
+    if cfg is None:
+        try: cfg = CLOUDFLARE.config()
+        except (OSError, ValueError): cfg = {}
+    if cfg.get('d1_database_id') and cfg.get('api_token') and cfg.get('account_id'):
+        storage.use_d1(cfg['account_id'], cfg['d1_database_id'], cfg['api_token'])
+        storage.init(DB)
+        return True
+    storage.use_sqlite()
+    storage.init(DB)
+    return False
 
 def init():
     global CLOUDFLARE, CLUSTER
-    storage.init(DB)
     auth.init()
     CLOUDFLARE = Manager(DB, on_update=publish)
-    CLOUDFLARE.init()
     cfg = {}
     try: cfg = CLOUDFLARE.config()
     except (OSError, ValueError): pass
+    apply_database_backend(cfg)
+    CLOUDFLARE.init()
+    if storage.backend_state().get('kind') == 'd1':
+        storage.migrate_local_to_d1(DB)
     node_id = cfg.get('installation_id') or None
-    CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish(), node_id=node_id)
+    CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish(), node_id=node_id,
+                      cluster_state=build_cluster_state(cfg, node_id))
 
 def record(hosts, started=None, error=None, source='network'):
     storage.record_batches(DB,[dict(hosts=hosts,started=started,error=error,source=source)])
@@ -190,6 +228,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(200,json.dumps(result).encode())
                 if self.path=='/api/cloudflare/connect':
                     result = CLOUDFLARE.connect(body)
+                    apply_database_backend(CLOUDFLARE.config())
+                    CLOUDFLARE.init()
+                    if storage.backend_state().get('kind') == 'd1':
+                        storage.migrate_local_to_d1(DB)
                     publish()
                     return self.send(200,json.dumps(dict(ok=True,**result)).encode())
                 if self.path=='/api/cloudflare/tunnels/update':

@@ -48,7 +48,7 @@ class EnsureHaDnsTests(unittest.TestCase):
         self.cfg = Path(self.temp.name) / 'cf.json'
         self.cfg.write_text(json.dumps(dict(
             api_token='token-value-for-ha-tests', zone_id='zone', account_id='account',
-            zone_name='chancecox.com', tunnel_id='tunnel')))
+            zone_name='example.com', suffix='house.example.com', tunnel_id='tunnel')))
         storage.init(self.db)
         self.api = HaDNSAPI()
         self.m = Manager(self.db, self.cfg, lambda token: self.api)
@@ -56,14 +56,14 @@ class EnsureHaDnsTests(unittest.TestCase):
 
     def test_creates_and_updates_ha_record(self):
         first = self.m.ensure_ha_dns('192.168.2.100')
-        self.assertEqual(first['hostname'], 'homescan.house.chancecox.com')
+        self.assertEqual(first['hostname'], 'homescan.house.example.com')
         self.assertEqual(list(self.api.records.values())[0]['content'], '192.168.2.100')
         self.assertEqual(list(self.api.records.values())[0]['comment'], 'homescan:ha')
         self.m.ensure_ha_dns('192.168.2.101')
         self.assertEqual(list(self.api.records.values())[0]['content'], '192.168.2.101')
 
     def test_refuses_foreign_record(self):
-        self.api.records['x'] = dict(id='x', name='homescan.house.chancecox.com', type='A',
+        self.api.records['x'] = dict(id='x', name='homescan.house.example.com', type='A',
                                      content='10.0.0.1', comment='manual')
         with self.assertRaisesRegex(CloudflareError, 'owned by another'):
             self.m.ensure_ha_dns('192.168.2.100')
@@ -77,7 +77,7 @@ class ClusterTests(unittest.TestCase):
         self.cfg = Path(self.temp.name) / 'cf.json'
         self.cfg.write_text(json.dumps(dict(
             api_token='token-value-for-ha-tests', zone_id='zone', account_id='account',
-            zone_name='chancecox.com')))
+            zone_name='example.com', suffix='house.example.com')))
         storage.init(self.db)
         self.api = HaDNSAPI()
         self.m = Manager(self.db, self.cfg, lambda token: self.api)
@@ -90,7 +90,7 @@ class ClusterTests(unittest.TestCase):
 
     def test_missing_dns_claims_leadership(self):
         cluster = Cluster(self.m, enabled=True, local_ip='192.168.2.100', node_id='node-a',
-                          hostname='homescan.house.chancecox.com', port=8080)
+                          hostname='homescan.house.example.com', port=8080)
         with mock.patch('ha.resolve_ipv4', return_value=[]):
             cluster.claim = mock.Mock(wraps=cluster.claim)
             with mock.patch.object(cluster, '_lead_until_step_down'):
@@ -100,7 +100,8 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(list(self.api.records.values())[0]['content'], '192.168.2.100')
 
     def test_dns_pointing_here_becomes_leader(self):
-        cluster = Cluster(self.m, enabled=True, local_ip='192.168.2.100', node_id='node-a')
+        cluster = Cluster(self.m, enabled=True, local_ip='192.168.2.100', node_id='node-a',
+                          hostname='homescan.house.example.com')
         with mock.patch('ha.resolve_ipv4', return_value=['192.168.2.100']):
             with mock.patch.object(cluster, '_lead_until_step_down'):
                 cluster.tick()
@@ -108,7 +109,8 @@ class ClusterTests(unittest.TestCase):
         self.assertTrue(cluster.public_state()['scanning'])
 
     def test_follower_times_out_and_claims(self):
-        cluster = Cluster(self.m, enabled=True, local_ip='192.168.2.101', node_id='node-b')
+        cluster = Cluster(self.m, enabled=True, local_ip='192.168.2.101', node_id='node-b',
+                          hostname='homescan.house.example.com')
         with mock.patch('ha.TIMEOUT', 0.2), mock.patch('ha.HEARTBEAT', 0.05):
             with mock.patch('ha.connect_ha', side_effect=ConnectionError('down')):
                 with mock.patch('ha.resolve_ipv4', return_value=['192.168.2.100']):
@@ -117,7 +119,8 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(list(self.api.records.values())[0]['content'], '192.168.2.101')
 
     def test_non_leader_ha_endpoint_returns_503(self):
-        cluster = Cluster(self.m, enabled=True, local_ip='192.168.2.101', node_id='node-b')
+        cluster = Cluster(self.m, enabled=True, local_ip='192.168.2.101', node_id='node-b',
+                          hostname='homescan.house.example.com')
         cluster.role = 'follower'
         sent = {}
 

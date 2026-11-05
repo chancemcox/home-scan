@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Subnet, [string]$Server = 'http://homescan.house.chancecox.com:8080', [string]$Token = $env:INGEST_TOKEN, [switch]$Once)
+param([Parameter(Mandatory=$true)][string]$Subnet, [string]$Server = $(if ($env:HOMESCAN_SERVER) { $env:HOMESCAN_SERVER } else { 'http://127.0.0.1:8080' }), [string]$Token = $env:INGEST_TOKEN, [switch]$Once)
 $ErrorActionPreference = 'Stop'
 if (!$Token) {
     $envFile = Join-Path $PSScriptRoot '.env'

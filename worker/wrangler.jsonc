@@ -1,0 +1,22 @@
+{
+  "name": "homescan-cluster",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-05",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CLUSTER",
+        "class_name": "HomeScanCluster"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["HomeScanCluster"]
+    }
+  ],
+  "vars": {
+    "CLUSTER_NAME": "homescan"
+  }
+}

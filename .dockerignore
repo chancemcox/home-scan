@@ -5,6 +5,8 @@
 !ws.py
 !ha.py
 !auth.py
+!d1.py
+!cluster_state.py
 !index.html
 !login.html
 !login.js

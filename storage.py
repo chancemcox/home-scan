@@ -4,9 +4,32 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from d1 import D1Connection
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+_BACKEND = {'kind': 'sqlite'}
+
+
+def use_sqlite():
+    """Use the local SQLite file passed to connect()/init()."""
+    _BACKEND.clear()
+    _BACKEND['kind'] = 'sqlite'
+
+
+def use_d1(account_id, database_id, token, caller=None):
+    """Use a shared Cloudflare D1 database for all HomeScan HA nodes."""
+    _BACKEND.clear()
+    _BACKEND.update(kind='d1', account_id=account_id, database_id=database_id, token=token, caller=caller)
+
+
+def backend_state():
+    if _BACKEND.get('kind') == 'd1':
+        return dict(kind='d1', database_id=_BACKEND.get('database_id') or '', shared=True)
+    return dict(kind='sqlite', database_id='', shared=False)
 
 
 class Connection(sqlite3.Connection):
@@ -16,6 +39,9 @@ class Connection(sqlite3.Connection):
 
 
 def connect(path):
+    if _BACKEND.get('kind') == 'd1':
+        return D1Connection(_BACKEND['account_id'], _BACKEND['database_id'], _BACKEND['token'],
+                            caller=_BACKEND.get('caller'))
     db = sqlite3.connect(path, timeout=30, factory=Connection)
     db.row_factory = sqlite3.Row
     return db
@@ -35,18 +61,22 @@ def identity(ip, mac):
 
 
 def init(path):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    if _BACKEND.get('kind') != 'd1':
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
-        db.execute('PRAGMA journal_mode=WAL')
+        if _BACKEND.get('kind') != 'd1':
+            db.execute('PRAGMA journal_mode=WAL')
         db.executescript('''
         CREATE TABLE IF NOT EXISTS status(key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS scans(id INTEGER PRIMARY KEY, started TEXT, finished TEXT, error TEXT, source TEXT NOT NULL DEFAULT 'network');
         CREATE TABLE IF NOT EXISTS sightings(scan_id INTEGER, ip TEXT, hostname TEXT, mac TEXT, device_id TEXT, PRIMARY KEY(scan_id,ip));
         CREATE TABLE IF NOT EXISTS ip_assignments(ip TEXT PRIMARY KEY, device_id TEXT, last_seen TEXT);
         ''')
-        db.execute('BEGIN IMMEDIATE')
+        if _BACKEND.get('kind') != 'd1':
+            db.execute('BEGIN IMMEDIATE')
         old = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='devices'").fetchone()
-        migrate = old and 'device_id' not in [r['name'] for r in db.execute('PRAGMA table_info(devices)')]
+        cols = [r['name'] for r in db.execute('PRAGMA table_info(devices)')] if old else []
+        migrate = bool(old) and 'device_id' not in cols and _BACKEND.get('kind') != 'd1'
         if migrate:
             db.execute('ALTER TABLE devices RENAME TO devices_legacy')
             db.execute('ALTER TABLE device_sources RENAME TO device_sources_legacy')
@@ -54,7 +84,8 @@ def init(path):
             hostname TEXT, mac TEXT, first_seen TEXT, last_seen TEXT, scan_id INTEGER)''')
         db.execute('''CREATE TABLE IF NOT EXISTS device_sources(device_id TEXT, source TEXT,
             last_seen TEXT, scan_id INTEGER, PRIMARY KEY(device_id,source))''')
-        if 'device_id' not in [r['name'] for r in db.execute('PRAGMA table_info(sightings)')]:
+        sighting_cols = [r['name'] for r in db.execute('PRAGMA table_info(sightings)')]
+        if 'device_id' not in sighting_cols:
             db.execute('ALTER TABLE sightings ADD COLUMN device_id TEXT')
         if migrate:
             mapping = {}
@@ -79,6 +110,45 @@ def init(path):
             db.execute('UPDATE sightings SET device_id=? WHERE rowid=?',
                        (identity(row['ip'],mac_address(row['mac'])),row['rowid']))
         db.execute('CREATE INDEX IF NOT EXISTS sightings_device ON sightings(device_id,scan_id)')
+
+
+def migrate_local_to_d1(path):
+    """Copy local SQLite inventory into an empty shared D1 database once."""
+    if _BACKEND.get('kind') != 'd1' or not Path(path).exists():
+        return False
+    with connect(path) as remote:
+        existing = remote.execute('SELECT count(*) AS c FROM devices').fetchone()
+        if existing and int(existing['c'] or 0) > 0:
+            return False
+    local = sqlite3.connect(path, timeout=30)
+    local.row_factory = sqlite3.Row
+    try:
+        tables = ('status', 'scans', 'sightings', 'ip_assignments', 'devices', 'device_sources',
+                  'cf_routes', 'cf_resources', 'cf_tunnel_links')
+        with connect(path) as remote:
+            for table in tables:
+                present = local.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                remote_present = remote.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                if not present or not remote_present:
+                    continue
+                rows = local.execute(f'SELECT * FROM {table}').fetchall()
+                if not rows:
+                    continue
+                cols = rows[0].keys()
+                placeholders = ','.join('?' for _ in cols)
+                col_list = ','.join(cols)
+                for row in rows:
+                    remote.execute(
+                        f'INSERT OR IGNORE INTO {table}({col_list}) VALUES({placeholders})',
+                        [row[c] for c in cols],
+                    )
+    finally:
+        local.close()
+    return True
 
 
 def normalize(hosts):
