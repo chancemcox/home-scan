@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 import ws
+import applog
 from cloudflare_sync import CloudflareError, private_ip
 from cluster_state import ClusterStateError
 
@@ -280,8 +281,10 @@ class Cluster:
         except (OSError, ConnectionError, ValueError, CloudflareError) as exc:
             if not self._stop.is_set():
                 self.message = str(exc)
+                applog.warning('HA follow failed', source='ha', detail=str(exc))
                 try: self.claim('unreachable-leader')
                 except (CloudflareError, ValueError) as claim_exc:
+                    applog.error('HA claim failed', source='ha', detail=str(claim_exc))
                     self._set_role('error', str(claim_exc))
         finally:
             if client:
@@ -382,6 +385,7 @@ class Cluster:
                            leader=dict(leader or {}, hostname=name))
             self._stop.wait(HEARTBEAT)
         except ClusterStateError as exc:
+            applog.error('HA Durable Object error', source='ha', detail=str(exc))
             self._set_role('error', str(exc))
             self._stop.wait(5)
 
@@ -390,6 +394,7 @@ class Cluster:
             try:
                 self.tick()
             except Exception as exc:
+                applog.exception('HA loop failed', source='ha', exc=exc)
                 self._set_role(self.role if self.role != 'starting' else 'error', str(exc))
                 self._stop.wait(5)
 

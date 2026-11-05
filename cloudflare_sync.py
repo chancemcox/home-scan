@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 import storage
 from d1 import ensure_database, D1Error
+import applog
 
 # Base DNS domain is configured per install (Settings / Cloudflare setup). No personal default.
 OLD_SUFFIXES = tuple(s for s in os.getenv('HOMESCAN_OLD_SUFFIXES', '').split(',') if s.strip())
@@ -175,6 +176,16 @@ class Manager:
                 state TEXT NOT NULL DEFAULT 'pending', message TEXT NOT NULL DEFAULT '', synced_ip TEXT,
                 last_checked TEXT, UNIQUE(tunnel_id,hostname,path));
             CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS app_logs(
+                id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                level TEXT NOT NULL,
+                push TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS app_logs_created ON app_logs(created_at);
             ''')
             # Optional one-time rewrite when HOMESCAN_OLD_SUFFIXES and a new suffix are set.
             new_suffix = ''
@@ -611,8 +622,10 @@ class Manager:
                     self._link_status(link,'synced','',ip)
                 if changed: api.call('PUT',path,{'config':dict(config,ingress=rules)})
             except (CloudflareError,ValueError) as exc:
+                applog.error('tunnel link sync error', source='cloudflare', detail=str(exc))
                 for link in group: self._link_status(link,'error',str(exc))
-            except Exception:
+            except Exception as exc:
+                applog.exception('tunnel link sync failed', source='cloudflare', exc=exc)
                 for link in group: self._link_status(link,'error','Tunnel link sync could not finish. Retrying automatically.')
 
     def save(self, body):
@@ -815,8 +828,13 @@ class Manager:
                                 'Connect Cloudflare to apply these settings.' if route['enabled'] else '')
                     continue
                 try: self.reconcile(api,cfg,route,devices.get(route['device_id']))
-                except (CloudflareError,ValueError) as exc: self.status(route,'error',str(exc))
-                except Exception: self.status(route,'error','Sync could not finish. Retrying automatically.')
+                except (CloudflareError,ValueError) as exc:
+                    applog.error('route sync error', source='cloudflare',
+                                 detail=f"{route.get('id')} {route.get('hostname')}: {exc}")
+                    self.status(route,'error',str(exc))
+                except Exception as exc:
+                    applog.exception('route sync failed', source='cloudflare', exc=exc)
+                    self.status(route,'error','Sync could not finish. Retrying automatically.')
 
     def connect(self, body):
         """Dashboard/API path for adding or rotating the Cloudflare API token."""
@@ -832,8 +850,11 @@ class Manager:
             self.wake.clear()
             try:
                 self.sync_once()
+                applog.expire()
                 if self.on_update: self.on_update()
-            except Exception: pass  # Cloudflare outages must not stop local inventory.
+            except Exception as exc:
+                # Cloudflare outages must not stop local inventory.
+                applog.exception('cloudflare sync loop failed', source='cloudflare', exc=exc)
 
 
 def atomic_json(path, value):

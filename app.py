@@ -8,6 +8,7 @@ from storage import device_states
 from cloudflare_sync import Manager, CloudflareError
 import deco
 import auth
+import applog
 from ws import Hub
 from ha import Cluster
 from cluster_state import ClusterState
@@ -70,6 +71,7 @@ def apply_database_backend(cfg=None):
 def init():
     global CLOUDFLARE, CLUSTER
     auth.init()
+    applog.configure(DB)
     CLOUDFLARE = Manager(DB, on_update=publish)
     cfg = {}
     try: cfg = CLOUDFLARE.config()
@@ -82,6 +84,8 @@ def init():
     node_id = cfg.get('installation_id') or None
     CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish(), node_id=node_id,
                       cluster_state=build_cluster_state(cfg, node_id))
+    applog.info('HomeScan started', source='app',
+                detail=json.dumps(dict(push=applog.PUSH, mode=MODE, database=storage.backend_state())))
 
 def record(hosts, started=None, error=None, source='network'):
     storage.record_batches(DB,[dict(hosts=hosts,started=started,error=error,source=source)])
@@ -106,7 +110,9 @@ def scanner():
                 name = h.find('hostnames/hostname')
                 hosts.append(dict(ip=addresses['ipv4'],mac=addresses.get('mac',''),hostname=name.get('name','') if name is not None else ''))
             record(hosts,started)
-        except Exception as exc: record([],started,str(exc)[:1000])
+        except Exception as exc:
+            applog.exception('nmap scan failed', source='scanner', exc=exc)
+            record([],started,str(exc)[:1000])
         time.sleep(max(0,INTERVAL-(time.monotonic()-tick)))
 
 class Handler(BaseHTTPRequestHandler):
@@ -191,12 +197,22 @@ class Handler(BaseHTTPRequestHandler):
                 tunnel_id = parse_qs(parsed.query).get('id',[''])[0]
                 return self.send(200,json.dumps(CLOUDFLARE.get_tunnel(tunnel_id)).encode())
             except (ValueError, KeyError, TypeError) as exc:
+                applog.warning('tunnel detail rejected', source='api', detail=str(exc))
                 return self.send(400,json.dumps({'error':str(exc)}).encode())
             except CloudflareError as exc:
+                applog.error('tunnel detail Cloudflare error', source='api', detail=str(exc))
                 return self.send(502,json.dumps({'error':str(exc)}).encode())
-            except Exception:
+            except Exception as exc:
+                applog.exception('tunnel detail failed', source='api', exc=exc)
                 return self.send(502,b'{"error":"Cloudflare could not load this tunnel."}')
         if self.path=='/api/deco': return self.send(200,json.dumps(deco.public_state()).encode())
+        if self.path=='/api/logs':
+            try:
+                limit = int(parse_qs(parsed.query).get('limit',['100'])[0])
+            except ValueError:
+                limit = 100
+            rows = storage.recent_logs(DB, limit=limit)
+            return self.send(200, json.dumps(dict(push=applog.PUSH, retention_days=applog.RETENTION_DAYS, logs=rows)).encode())
         if self.path!='/api/devices': return self.send(404,b'{}')
         self.send(200,devices_payload().encode())
 
@@ -208,8 +224,10 @@ class Handler(BaseHTTPRequestHandler):
                 headers = {'Set-Cookie': auth.cookie_header(result['token'], result['remember'], result['max_age'])}
                 return self.send(200, json.dumps({'ok':True,'username':result['username']}).encode(), headers=headers)
             except ValueError as exc:
+                applog.warning('login rejected', source='auth', detail=str(exc))
                 return self.send(401, json.dumps({'error':str(exc)}).encode())
-            except Exception:
+            except Exception as exc:
+                applog.exception('login failed', source='auth', exc=exc)
                 return self.send(500, b'{"error":"Sign in failed."}')
         if self.path=='/api/logout':
             auth.logout(self.session_token())
@@ -261,9 +279,14 @@ class Handler(BaseHTTPRequestHandler):
                 publish()
                 return self.send(200,b'{"ok":true}')
             except (ValueError,KeyError,TypeError) as exc:
+                applog.warning('settings request rejected', source='api', detail=f'{self.path}: {exc}')
                 return self.send(400,json.dumps({'error':str(exc)}).encode())
             except CloudflareError as exc:
+                applog.error('settings Cloudflare error', source='api', detail=f'{self.path}: {exc}')
                 return self.send(502,json.dumps({'error':str(exc)}).encode())
+            except Exception as exc:
+                applog.exception('settings request failed', source='api', exc=exc)
+                return self.send(500,b'{"error":"Request failed."}')
         if self.path!='/api/scan' or MODE!='agent': return self.send(404,b'{}')
         if not TOKEN or not secrets.compare_digest(self.headers.get('Authorization',''),'Bearer '+TOKEN):
             return self.send(401,b'{"error":"Unauthorized"}')
@@ -287,6 +310,7 @@ class Handler(BaseHTTPRequestHandler):
             CLOUDFLARE.wake.set()
             publish()
         except (ValueError,KeyError,TypeError) as exc:
+            applog.warning('scan ingest rejected', source='api', detail=str(exc))
             return self.send(400,json.dumps({'error':str(exc)}).encode())
         self.send(200,b'{"ok":true}')
 
@@ -296,9 +320,13 @@ if __name__=='__main__':
     if MODE=='nmap':
         net=ipaddress.IPv4Network(NETWORK,strict=False)
         if not net.is_private or net.num_addresses>4096: raise ValueError('Use a private subnet with at most 4096 addresses')
-    init()
-    threading.Thread(target=CLOUDFLARE.run,daemon=True).start()
-    CLOUDFLARE.wake.set()
-    threading.Thread(target=CLUSTER.run,daemon=True,name='homescan-ha').start()
-    if MODE=='nmap': threading.Thread(target=scanner,daemon=True).start()
-    ThreadingHTTPServer(('0.0.0.0',80),Handler).serve_forever()
+    try:
+        init()
+        threading.Thread(target=CLOUDFLARE.run,daemon=True).start()
+        CLOUDFLARE.wake.set()
+        threading.Thread(target=CLUSTER.run,daemon=True,name='homescan-ha').start()
+        if MODE=='nmap': threading.Thread(target=scanner,daemon=True).start()
+        ThreadingHTTPServer(('0.0.0.0',80),Handler).serve_forever()
+    except Exception as exc:
+        applog.exception('HomeScan process crashed', source='app', exc=exc)
+        raise

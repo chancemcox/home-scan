@@ -1,11 +1,15 @@
 services:
   homescan:
-    build: .
+    build:
+      context: .
+      args:
+        HOMESCAN_PUSH: ${HOMESCAN_PUSH:-unknown}
     restart: unless-stopped
     network_mode: host
     environment:
       SCAN_MODE: nmap
       SCAN_NETWORK: ${SCAN_NETWORK:-192.168.1.0/24}
+      HOMESCAN_PUSH: ${HOMESCAN_PUSH:-unknown}
     volumes:
       - homescan-data:/data
       - homescan-tunnel:/run/homescan-tunnel

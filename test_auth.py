@@ -55,6 +55,13 @@ class AuthTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'username and password'):
             auth.login('', '', False)
 
+    def test_username_is_case_insensitive(self):
+        for name in ('Admin', 'ADMIN', 'aDmIn'):
+            result = auth.login(name, self.password, remember=False)
+            self.assertEqual(result['username'], 'admin')
+            self.assertEqual(auth.session_user(result['token']), 'admin')
+            auth.logout(result['token'])
+
     def test_remember_me_sets_longer_cookie_lifetime(self):
         session = auth.login('admin', self.password, remember=False)
         remembered = auth.login('admin', self.password, remember=True)

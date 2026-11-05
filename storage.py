@@ -1,7 +1,7 @@
 import ipaddress
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from d1 import D1Connection
@@ -69,6 +69,16 @@ def init(path):
         db.executescript('''
         CREATE TABLE IF NOT EXISTS status(key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS app_logs(
+            id INTEGER PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            level TEXT NOT NULL,
+            push TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS app_logs_created ON app_logs(created_at);
         CREATE TABLE IF NOT EXISTS scans(id INTEGER PRIMARY KEY, started TEXT, finished TEXT, error TEXT, source TEXT NOT NULL DEFAULT 'network');
         CREATE TABLE IF NOT EXISTS sightings(scan_id INTEGER, ip TEXT, hostname TEXT, mac TEXT, device_id TEXT, PRIMARY KEY(scan_id,ip));
         CREATE TABLE IF NOT EXISTS ip_assignments(ip TEXT PRIMARY KEY, device_id TEXT, last_seen TEXT);
@@ -142,6 +152,37 @@ def set_settings(path, mapping):
             )
 
 
+def append_log(path, level, push, source, message, detail='', created_at=None):
+    """Persist one diagnostic log row (Cloudflare D1 when that backend is active)."""
+    stamp = created_at or now()
+    with connect(path) as db:
+        db.execute(
+            'INSERT INTO app_logs(created_at, level, push, source, message, detail) VALUES(?,?,?,?,?,?)',
+            (stamp, str(level)[:16], str(push)[:64], str(source)[:64],
+             str(message)[:2000], str(detail or '')[:8000]),
+        )
+
+
+def expire_logs(path, older_than_days=30):
+    """Delete log rows older than the retention window (default one month)."""
+    days = max(1, int(older_than_days or 30))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with connect(path) as db:
+        cursor = db.execute('DELETE FROM app_logs WHERE created_at < ?', (cutoff,))
+        return int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)
+
+
+def recent_logs(path, limit=100):
+    limit = max(1, min(500, int(limit or 100)))
+    with connect(path) as db:
+        rows = db.execute(
+            'SELECT created_at, level, push, source, message, detail FROM app_logs '
+            'ORDER BY created_at DESC, id DESC LIMIT ?',
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def migrate_local_to_d1(path):
     """Copy local SQLite inventory into an empty shared D1 database once.
 
@@ -157,8 +198,8 @@ def migrate_local_to_d1(path):
         with connect(path) as remote:
             existing = remote.execute('SELECT count(*) AS c FROM devices').fetchone()
             empty = not existing or int(existing['c'] or 0) == 0
-            tables = ('status', 'app_settings', 'scans', 'sightings', 'ip_assignments', 'devices',
-                      'device_sources', 'cf_routes', 'cf_resources', 'cf_tunnel_links')
+            tables = ('status', 'app_settings', 'app_logs', 'scans', 'sightings', 'ip_assignments',
+                      'devices', 'device_sources', 'cf_routes', 'cf_resources', 'cf_tunnel_links')
             for table in tables:
                 present = local.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -168,9 +209,9 @@ def migrate_local_to_d1(path):
                 rows = local.execute(f'SELECT * FROM {table}').fetchall()
                 if not rows:
                     continue
-                if table != 'app_settings' and not empty:
+                if table not in ('app_settings',) and not empty:
                     continue
-                cols = rows[0].keys()
+                cols = [c for c in rows[0].keys() if not (table == 'app_logs' and c == 'id')]
                 placeholders = ','.join('?' for _ in cols)
                 col_list = ','.join(cols)
                 for row in rows:

@@ -1,6 +1,9 @@
 services:
   homescan:
-    build: .
+    build:
+      context: .
+      args:
+        HOMESCAN_PUSH: ${HOMESCAN_PUSH:-unknown}
     restart: unless-stopped
     ports:
       - "8080:80"
@@ -14,6 +17,7 @@ services:
       CLUSTER_WORKER_URL: ${CLUSTER_WORKER_URL:-}
       CLUSTER_SECRET: ${CLUSTER_SECRET:-}
       HOMESCAN_ADMIN_PASSWORD: ${HOMESCAN_ADMIN_PASSWORD:-}
+      HOMESCAN_PUSH: ${HOMESCAN_PUSH:-unknown}
     volumes:
       - homescan-data:/data
       - ./.secrets:/run/homescan-secrets:ro

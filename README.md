@@ -25,6 +25,17 @@ Network and Deco observations have separate presence states. Deco connection fai
 - **Cloudflare D1** — optional shared SQL database named `homescan` for multi-node HA (enable in Cloudflare setup; needs Account → D1 → Edit).
 - **Durable Object cluster worker** (`worker/`) — optional Cloudflare in-memory coordinator for leader election and live inventory fan-out. Deploy with Wrangler, then set `CLUSTER_WORKER_URL` and `CLUSTER_SECRET`.
 
+## Diagnostics
+
+Errors are written to stderr and stored in the shared DB (`app_logs` on Cloudflare D1 when enabled). Rows auto-expire after **30 days**. Every log line includes the deploy push id (`HOMESCAN_PUSH` / image `PUSH` file) so you can match failures to a commit.
+
+```powershell
+$env:HOMESCAN_PUSH = (git rev-parse --short HEAD)
+docker compose up -d --build
+```
+
+Signed-in clients can read recent rows from `GET /api/logs`.
+
 ## Cloudflare per-device settings
 
 Set your **base domain** under **Settings** (also set automatically from the zone you connect). Then use **Configure** on a device with a known MAC:

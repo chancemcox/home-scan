@@ -10,7 +10,7 @@ from pathlib import Path
 
 USERS_PATH = Path(os.getenv('USERS_PATH', '/data/users.json'))
 BOOTSTRAP_PASSWORD_PATH = Path(os.getenv('BOOTSTRAP_PASSWORD_PATH', str(USERS_PATH.with_name('initial-admin-password.txt'))))
-DEFAULT_USER = os.getenv('HOMESCAN_ADMIN_USER', 'admin').strip() or 'admin'
+DEFAULT_USER = (os.getenv('HOMESCAN_ADMIN_USER', 'admin').strip() or 'admin').casefold()
 SESSION_COOKIE = 'homescan_session'
 SESSION_HOURS = 12
 REMEMBER_DAYS = 30
@@ -106,6 +106,19 @@ def _purge_sessions():
         _sessions.pop(token, None)
 
 
+def _lookup_user(users, username):
+    """Resolve a username case-insensitively; returns (canonical_name, hash) or (None, None)."""
+    wanted = str(username or '').strip().casefold()
+    if not wanted:
+        return None, None
+    if wanted in users:
+        return wanted, users[wanted]
+    for name, hashed in users.items():
+        if str(name).casefold() == wanted:
+            return name, hashed
+    return None, None
+
+
 def login(username, password, remember=False):
     username = str(username or '').strip()
     password = str(password or '')
@@ -113,14 +126,14 @@ def login(username, password, remember=False):
         raise ValueError('Enter a username and password.')
     with _lock:
         users = _load_users()
-        stored = users.get(username)
+        canonical, stored = _lookup_user(users, username)
         if not stored or not verify_password(password, stored):
             raise ValueError('Invalid username or password.')
         _purge_sessions()
         token = secrets.token_urlsafe(32)
         lifetime = timedelta(days=REMEMBER_DAYS) if remember else timedelta(hours=SESSION_HOURS)
-        _sessions[token] = dict(username=username, expires=now() + lifetime, remember=bool(remember))
-        return dict(token=token, username=username, remember=bool(remember),
+        _sessions[token] = dict(username=canonical, expires=now() + lifetime, remember=bool(remember))
+        return dict(token=token, username=canonical, remember=bool(remember),
                     max_age=int(lifetime.total_seconds()) if remember else None)
 
 
