@@ -52,6 +52,25 @@ def resolve_ipv4(hostname):
     return ips
 
 
+def _is_private_ipv4(ip):
+    try:
+        private_ip(ip)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_ha_ipv4(hostname):
+    """Resolve HA hostname to LAN peers only.
+
+    Docker Desktop DNS sometimes returns Cloudflare proxy anycast IPs for a
+    DNS-only private A record. Those are never HomeScan nodes, so ignore them.
+    """
+    ips = resolve_ipv4(hostname)
+    private = [ip for ip in ips if _is_private_ipv4(ip)]
+    return private
+
+
 def masked_frame(opcode, payload=b''):
     mask = os.urandom(4)
     body = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
@@ -317,7 +336,7 @@ class Cluster:
             self._set_role('waiting', 'Connect Cloudflare so HA can manage '+name)
             time.sleep(5)
             return
-        ips = resolve_ipv4(name)
+        ips = resolve_ha_ipv4(name)
         if not ips:
             try:
                 self.claim('dns-missing')
@@ -345,7 +364,7 @@ class Cluster:
         while not self._stop.is_set() and self.role == 'leader':
             self.broadcast()
             time.sleep(HEARTBEAT)
-            ips = resolve_ipv4(name)
+            ips = resolve_ha_ipv4(name)
             if ips and self.local_ip not in ips:
                 self._set_role('follower', 'Standby · DNS moved to '+ips[0],
                                leader=dict(ip=ips[0], hostname=name))

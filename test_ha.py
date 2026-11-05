@@ -110,6 +110,20 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(cluster.role, 'leader')
         self.assertTrue(cluster.public_state()['scanning'])
 
+    def test_cloudflare_proxy_answers_are_ignored_for_ha(self):
+        # Docker Desktop sometimes returns CF anycast IPs for a DNS-only LAN record.
+        with mock.patch('ha.resolve_ipv4', return_value=['104.21.45.24', '172.67.208.17']):
+            self.assertEqual(ha.resolve_ha_ipv4('homescan.house.example.com'), [])
+        with mock.patch('ha.resolve_ipv4', return_value=['104.21.45.24', '192.168.2.100']):
+            self.assertEqual(ha.resolve_ha_ipv4('homescan.house.example.com'), ['192.168.2.100'])
+        cluster = Cluster(self.m, enabled=True, local_ip='192.168.2.100', node_id='node-a',
+                          hostname='homescan.house.example.com')
+        with mock.patch('ha.resolve_ipv4', return_value=['104.21.45.24', '172.67.208.17']):
+            with mock.patch.object(cluster, '_lead_until_step_down'):
+                cluster.tick()
+        self.assertEqual(cluster.role, 'leader')
+        self.assertEqual(list(self.api.records.values())[0]['content'], '192.168.2.100')
+
     def test_follower_times_out_and_claims(self):
         cluster = Cluster(self.m, enabled=True, local_ip='192.168.2.101', node_id='node-b',
                           hostname='homescan.house.example.com')
