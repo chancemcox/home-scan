@@ -86,6 +86,10 @@ async function openTunnel(id){
   editingTunnelDetail=result;$('tunnel-edit-name').value=result.name;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderPortEditors();renderTunnelLinks();$('tunnel-edit-save').disabled=false;
  }catch(e){$('tunnel-edit-error').textContent=e.message}
 }
+function syncIngressService(index,url){
+ editingTunnelDetail.config.ingress[index].service=url.toString().replace(/\/$/,'');
+ $('tunnel-edit-config').value=JSON.stringify(editingTunnelDetail.config,null,2);
+}
 function renderPortEditors(){
  const box=$('tunnel-rule-ports');box.replaceChildren();
  (editingTunnelDetail?.config?.ingress||[]).forEach((rule,index)=>{
@@ -95,11 +99,13 @@ function renderPortEditors(){
   const label=document.createElement('label');label.textContent=`${rule.hostname||'*'}${rule.path?' · '+rule.path:''}`;
   row.append(label);
   if(url&&['http:','https:','tcp:','ssh:','rdp:','smb:'].includes(url.protocol)){
-   const input=document.createElement('input');input.type='number';input.min='1';input.max='65535';input.value=url.port||({'http:':80,'https:':443}[url.protocol]||'');input.title='Origin port';
-   input.addEventListener('input',()=>{if(!input.value)return;url.port=input.value;editingTunnelDetail.config.ingress[index].service=url.toString().replace(/\/$/,'');$('tunnel-edit-config').value=JSON.stringify(editingTunnelDetail.config,null,2)});
-   row.append(input);
+   const host=document.createElement('input');host.type='text';host.value=url.hostname||'';host.placeholder='192.168.1.10';host.autocomplete='off';host.spellcheck=false;host.title='Origin host (LAN IP or hostname the connector can reach)';
+   host.addEventListener('input',()=>{if(!host.value.trim())return;url.hostname=host.value.trim();syncIngressService(index,url)});
+   const port=document.createElement('input');port.type='number';port.min='1';port.max='65535';port.value=url.port||({'http:':80,'https:':443}[url.protocol]||'');port.title='Origin port';
+   port.addEventListener('input',()=>{if(!port.value)return;url.port=port.value;syncIngressService(index,url)});
+   row.append(host,port);
   }else{
-   const spacer=document.createElement('span');spacer.className='port-spacer';row.append(spacer);
+   const note=document.createElement('span');note.className='port-spacer';note.textContent=rule.service||'—';note.title='Non-URL origin; edit JSON below';row.append(note);
   }
   const remove=document.createElement('button');remove.type='button';remove.textContent='Delete';remove.className='danger';remove.title='Delete this public hostname';
   remove.addEventListener('click',()=>deleteTunnelHostname(rule));row.append(remove);box.append(row);

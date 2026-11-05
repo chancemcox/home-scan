@@ -315,6 +315,8 @@ class FrontendAssetTests(unittest.TestCase):
         html = self.read('index.html')
         js = self.read('app.js')
         self.assertIn('id="tunnel-add-hostname"', html)
+        self.assertIn('origin host and port', html)
+        self.assertIn('url.hostname=host.value.trim()', js)
         self.assertIn('/api/cloudflare/tunnels/delete-hostname', js)
         self.assertIn('/api/cloudflare/tunnels/delete', js)
         self.assertIn('schedulePoll', js)

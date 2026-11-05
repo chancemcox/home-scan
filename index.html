@@ -78,7 +78,7 @@
 <div class="dialog-head"><div><small class="eyebrow">CLOUDFLARE TUNNEL</small><h2>Edit tunnel</h2></div><button type="button" class="close" data-close="tunnel-dialog" aria-label="Close tunnel editor">×</button></div>
 <p id="tunnel-edit-id" class="mono"></p>
 <label for="tunnel-edit-name">Tunnel name</label><input id="tunnel-edit-name" maxlength="100" required autocomplete="off">
-<fieldset><legend>Public hostnames</legend><p>Edit origin ports or delete individual hostnames. Add another hostname to the same computer with <strong>Add hostname</strong>.</p><div id="tunnel-rule-ports"></div><button id="tunnel-add-hostname" type="button">Add hostname</button></fieldset>
+<fieldset><legend>Public hostnames</legend><p>Edit the origin host and port the connector reaches, or delete a hostname. Add another hostname to the same computer with <strong>Add hostname</strong>.</p><div id="tunnel-rule-ports"></div><button id="tunnel-add-hostname" type="button">Add hostname</button></fieldset>
 <label for="tunnel-edit-config">Remote configuration (JSON)</label><textarea id="tunnel-edit-config" rows="16" spellcheck="false" required></textarea>
 <p class="hint">The last ingress rule must be a catch-all. HomeScan-managed device routes must be changed from the device inventory.</p>
 <fieldset><legend>Automatic origin IP</legend>
