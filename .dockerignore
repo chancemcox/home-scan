@@ -8,6 +8,7 @@
 !d1.py
 !cluster_state.py
 !applog.py
+!do_db.py
 !index.html
 !login.html
 !login.js

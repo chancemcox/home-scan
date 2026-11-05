@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from d1 import D1Connection
+from do_db import DoConnection
 
 
 def now():
@@ -26,10 +27,23 @@ def use_d1(account_id, database_id, token, caller=None):
     _BACKEND.update(kind='d1', account_id=account_id, database_id=database_id, token=token, caller=caller)
 
 
+def use_do(base_url, secret, opener=None):
+    """Use the Durable Object SQLite database (shared in-memory-backed tables)."""
+    _BACKEND.clear()
+    _BACKEND.update(kind='durable-object', base_url=base_url, secret=secret, opener=opener)
+
+
 def backend_state():
-    if _BACKEND.get('kind') == 'd1':
+    kind = _BACKEND.get('kind') or 'sqlite'
+    if kind == 'd1':
         return dict(kind='d1', database_id=_BACKEND.get('database_id') or '', shared=True)
+    if kind == 'durable-object':
+        return dict(kind='durable-object', database_id='', shared=True)
     return dict(kind='sqlite', database_id='', shared=False)
+
+
+def _remote_backend():
+    return _BACKEND.get('kind') in ('d1', 'durable-object')
 
 
 class Connection(sqlite3.Connection):
@@ -42,6 +56,8 @@ def connect(path):
     if _BACKEND.get('kind') == 'd1':
         return D1Connection(_BACKEND['account_id'], _BACKEND['database_id'], _BACKEND['token'],
                             caller=_BACKEND.get('caller'))
+    if _BACKEND.get('kind') == 'durable-object':
+        return DoConnection(_BACKEND['base_url'], _BACKEND['secret'], opener=_BACKEND.get('opener'))
     db = sqlite3.connect(path, timeout=30, factory=Connection)
     db.row_factory = sqlite3.Row
     return db
@@ -61,10 +77,10 @@ def identity(ip, mac):
 
 
 def init(path):
-    if _BACKEND.get('kind') != 'd1':
+    if not _remote_backend():
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
-        if _BACKEND.get('kind') != 'd1':
+        if not _remote_backend():
             db.execute('PRAGMA journal_mode=WAL')
         db.executescript('''
         CREATE TABLE IF NOT EXISTS status(key TEXT PRIMARY KEY, value TEXT);
@@ -83,11 +99,11 @@ def init(path):
         CREATE TABLE IF NOT EXISTS sightings(scan_id INTEGER, ip TEXT, hostname TEXT, mac TEXT, device_id TEXT, PRIMARY KEY(scan_id,ip));
         CREATE TABLE IF NOT EXISTS ip_assignments(ip TEXT PRIMARY KEY, device_id TEXT, last_seen TEXT);
         ''')
-        if _BACKEND.get('kind') != 'd1':
+        if not _remote_backend():
             db.execute('BEGIN IMMEDIATE')
         old = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='devices'").fetchone()
         cols = [r['name'] for r in db.execute('PRAGMA table_info(devices)')] if old else []
-        migrate = bool(old) and 'device_id' not in cols and _BACKEND.get('kind') != 'd1'
+        migrate = bool(old) and 'device_id' not in cols and not _remote_backend()
         if migrate:
             db.execute('ALTER TABLE devices RENAME TO devices_legacy')
             db.execute('ALTER TABLE device_sources RENAME TO device_sources_legacy')
@@ -183,13 +199,13 @@ def recent_logs(path, limit=100):
     return [dict(row) for row in rows]
 
 
-def migrate_local_to_d1(path):
-    """Copy local SQLite inventory into an empty shared D1 database once.
+def migrate_local_to_remote(path):
+    """Copy local SQLite into an empty shared remote DB (D1 or Durable Object).
 
-    Shared app_settings are always upserted so former hardcoded install defaults
-    (base domain, zone, tunnel id, …) reach D1 even when inventory already exists.
+    Shared app_settings are always upserted so install defaults reach Cloudflare
+    even when inventory already exists.
     """
-    if _BACKEND.get('kind') != 'd1' or not Path(path).exists():
+    if not _remote_backend() or not Path(path).exists():
         return False
     local = sqlite3.connect(path, timeout=30)
     local.row_factory = sqlite3.Row
@@ -230,6 +246,11 @@ def migrate_local_to_d1(path):
     finally:
         local.close()
     return copied
+
+
+def migrate_local_to_d1(path):
+    """Backward-compatible alias for migrate_local_to_remote()."""
+    return migrate_local_to_remote(path)
 
 
 def normalize(hosts):

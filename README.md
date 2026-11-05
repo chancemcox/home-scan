@@ -22,12 +22,12 @@ Network and Deco observations have separate presence states. Deco connection fai
 ## Shared state options
 
 - **Local SQLite** (`/data/homescan.db`) — default single-node store.
-- **Cloudflare D1** — optional shared SQL database named `homescan` for multi-node HA (enable in Cloudflare setup; needs Account → D1 → Edit).
-- **Durable Object cluster worker** (`worker/`) — optional Cloudflare in-memory coordinator for leader election and live inventory fan-out. Deploy with Wrangler, then set `CLUSTER_WORKER_URL` and `CLUSTER_SECRET`.
+- **Durable Object SQL** (`worker/`) — preferred shared store when `CLUSTER_WORKER_URL` + `CLUSTER_SECRET` are set. All inventory, Cloudflare routes, settings, and logs live in the DO’s in-memory SQLite tables (also used for leader election + live inventory).
+- **Cloudflare D1** — optional shared SQL fallback if the Durable Object worker is not configured (enable in Cloudflare setup; needs Account → D1 → Edit).
 
 ## Diagnostics
 
-Errors are written to stderr and stored in the shared DB (`app_logs` on Cloudflare D1 when enabled). Rows auto-expire after **30 days**. Every log line includes the deploy push id (`HOMESCAN_PUSH` / image `PUSH` file) so you can match failures to a commit.
+Errors are written to stderr and stored in the shared DB (`app_logs` in the Durable Object SQL store when configured, otherwise D1/local). Rows auto-expire after **30 days**. Every log line includes the deploy push id (`HOMESCAN_PUSH` / image `PUSH` file) so you can match failures to a commit.
 
 ```powershell
 $env:HOMESCAN_PUSH = (git rev-parse --short HEAD)

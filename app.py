@@ -56,10 +56,16 @@ def build_cluster_state(cfg, node_id):
     return ClusterState(url, secret, node_id or uuid.uuid4().hex)
 
 def apply_database_backend(cfg=None):
-    """Prefer shared Cloudflare D1 when configured so HA nodes share inventory."""
+    """Prefer Durable Object SQL (in-memory tables), then D1, then local SQLite."""
     if cfg is None:
         try: cfg = CLOUDFLARE.config()
         except (OSError, ValueError): cfg = {}
+    do_url = (cfg.get('cluster_worker_url') or os.getenv('CLUSTER_WORKER_URL') or '').strip()
+    do_secret = (cfg.get('cluster_secret') or os.getenv('CLUSTER_SECRET') or '').strip()
+    if do_url and do_secret:
+        storage.use_do(do_url, do_secret)
+        storage.init(DB)
+        return True
     if cfg.get('d1_database_id') and cfg.get('api_token') and cfg.get('account_id'):
         storage.use_d1(cfg['account_id'], cfg['d1_database_id'], cfg['api_token'])
         storage.init(DB)
@@ -78,8 +84,8 @@ def init():
     except (OSError, ValueError): pass
     apply_database_backend(cfg)
     CLOUDFLARE.init()
-    if storage.backend_state().get('kind') == 'd1':
-        storage.migrate_local_to_d1(DB)
+    if storage.backend_state().get('shared'):
+        storage.migrate_local_to_remote(DB)
         CLOUDFLARE.sync_shared_settings()
     node_id = cfg.get('installation_id') or None
     CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish(), node_id=node_id,
@@ -249,8 +255,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = CLOUDFLARE.connect(body)
                     apply_database_backend(CLOUDFLARE.config())
                     CLOUDFLARE.init()
-                    if storage.backend_state().get('kind') == 'd1':
-                        storage.migrate_local_to_d1(DB)
+                    if storage.backend_state().get('shared'):
+                        storage.migrate_local_to_remote(DB)
                         CLOUDFLARE.sync_shared_settings()
                     publish()
                     return self.send(200,json.dumps(dict(ok=True,**result)).encode())

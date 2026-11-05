@@ -258,7 +258,7 @@ $('filter-status').addEventListener('change',render);
 $('filter-cloudflare').addEventListener('change',render);
 for(const button of document.querySelectorAll('button.sort'))button.addEventListener('click',()=>{if(sortKey===button.dataset.sort)sortDir*=-1;else{sortKey=button.dataset.sort;sortDir=1}render()});
 function applyStatus(){
- const dbLabel=cf.database?.kind==='d1'||cf.d1_database_id?' · shared D1':'';
+ const dbLabel=cf.database?.kind==='durable-object'?' · shared DO memory':(cf.database?.kind==='d1'||cf.d1_database_id?' · shared D1':'');
  $('cloud-state').textContent=cf.configured?'Cloudflare connected · '+cf.zone+dbLabel:'Cloudflare not connected · Configure devices, then connect your account';
  $('sync-button').disabled=!cf.configured;
  if(!decoState.configured)$('deco-state').textContent='Deco: not configured';
