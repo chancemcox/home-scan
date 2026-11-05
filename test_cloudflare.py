@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urlsplit,parse_qs
 import storage
 from cloudflare_sync import Manager, CloudflareError, hostname
@@ -44,32 +45,81 @@ class FakeAPI:
 
 class TunnelEditingAPI:
     TID='11111111-2222-3333-4444-555555555555'
+    OTHER='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     def __init__(self, config_src='cloudflare'):
         self.tunnel=dict(id=self.TID,name='paperless',config_src=config_src)
+        self.other=dict(id=self.OTHER,name='home assistant',config_src='cloudflare')
         self.config={'ingress':[{'hostname':'docs.example.com','service':'http://192.168.2.10:8000'},
                                 {'service':'http_status:404'}]}
-        self.writes=[]
+        self.other_config={'ingress':[{'hostname':'ha.other.example','service':'http://192.168.2.101:8123'},
+                                      {'hostname':'n8n.other.example','service':'http://192.168.2.101:5678'},
+                                      {'service':'http_status:404'}]}
+        self.writes=[];self.deleted=False
     def call(self,method,path,body=None):
+        if path.endswith('/'+self.OTHER+'/configurations'):
+            if method=='GET': return {'config':copy.deepcopy(self.other_config)}
+            self.writes.append((method,path,copy.deepcopy(body)))
+            self.other_config=copy.deepcopy(body['config']);return {'config':copy.deepcopy(self.other_config)}
         if path.endswith('/configurations'):
             if method=='GET': return {'config':copy.deepcopy(self.config)}
             self.writes.append((method,path,copy.deepcopy(body)))
             self.config=copy.deepcopy(body['config']);return {'config':copy.deepcopy(self.config)}
+        if path.endswith('/'+self.OTHER):
+            if method=='GET': return copy.deepcopy(self.other)
+            if method=='DELETE': self.writes.append((method,path,body));self.deleted=True;return copy.deepcopy(self.other)
+            raise AssertionError((method,path,body))
         if path.endswith('/'+self.TID):
             if method=='GET': return copy.deepcopy(self.tunnel)
+            if method=='DELETE': self.writes.append((method,path,body));self.deleted=True;return copy.deepcopy(self.tunnel)
             self.writes.append((method,path,copy.deepcopy(body)))
             self.tunnel['name']=body['name'];return copy.deepcopy(self.tunnel)
+        if method=='GET' and path.startswith('/zones?'): return []
         if method=='GET': return [copy.deepcopy(self.tunnel)]
         raise AssertionError((method,path,body))
 
 class RouteCreationAPI(TunnelEditingAPI):
     def __init__(self):
         super().__init__();self.records=[]
+        self.zones={'zone':{'id':'zone','name':'chancecox.com','account':{'id':'account'}},
+                    'zone2':{'id':'zone2','name':'other.example','account':{'id':'account'}}}
     def call(self,method,path,body=None):
-        if path=='/zones/zone2': return {'id':'zone2','name':'other.example','account':{'id':'account'}}
-        if path.startswith('/zones/zone2/dns_records'):
-            if method=='GET': return copy.deepcopy(self.records)
-            record=dict(body,id='dns1');self.records.append(record);self.writes.append((method,path,copy.deepcopy(body)));return record
+        if path in ('/zones/zone','/zones/zone2'): return copy.deepcopy(self.zones[path.rsplit('/',1)[-1]])
+        if method=='GET' and path.startswith('/zones?'):
+            name=parse_qs(urlsplit(path).query).get('name',[''])[0]
+            return [copy.deepcopy(z) for z in self.zones.values() if z['name']==name]
+        for zone_id in self.zones:
+            prefix=f'/zones/{zone_id}/dns_records'
+            if path.startswith(prefix):
+                if method=='GET':
+                    name=parse_qs(urlsplit(path).query).get('name',[None])[0]
+                    rows=copy.deepcopy(self.records)
+                    return [r for r in rows if name is None or r.get('name')==name]
+                if method=='DELETE':
+                    rid=path.rsplit('/',1)[-1];self.records=[r for r in self.records if r.get('id')!=rid]
+                    self.writes.append((method,path,body));return {'id':rid}
+                record=dict(body,id='dns'+str(len(self.records)+1));self.records.append(record)
+                self.writes.append((method,path,copy.deepcopy(body)));return record
         return super().call(method,path,body)
+
+class SetupAPI:
+    def __init__(self):
+        self.token=None;self.writes=[];self.tunnels=[];self.tokens={}
+        self.zone={'id':'zone','name':'chancecox.com','account':{'id':'account'}}
+    def call(self,method,path,body=None):
+        if method=='GET' and path.startswith('/zones?'):
+            name=parse_qs(urlsplit(path).query).get('name',[''])[0]
+            return [copy.deepcopy(self.zone)] if name in ('chancecox.com','house.chancecox.com') else []
+        if method=='GET' and 'cfd_tunnel' in path and path.endswith('/token'):
+            tid=path.rsplit('/',2)[-2];return self.tokens.setdefault(tid,'connector-token-'+tid[:8])
+        if method=='GET' and 'cfd_tunnel' in path and 'configurations' not in path and '?' in path:
+            name=parse_qs(urlsplit(path).query).get('name',[''])[0]
+            return [copy.deepcopy(t) for t in self.tunnels if t.get('name')==name]
+        if method=='POST' and path.endswith('/cfd_tunnel'):
+            tunnel=dict(id='new-tunnel-id',name=body['name'],config_src='cloudflare')
+            self.tunnels.append(tunnel);self.writes.append((method,path,copy.deepcopy(body)));return copy.deepcopy(tunnel)
+        if method=='PUT' and path.endswith('/configurations'):
+            self.writes.append((method,path,copy.deepcopy(body)));return {'config':body['config']}
+        raise AssertionError((method,path,body))
 
 class IntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -88,6 +138,50 @@ class IntegrationTests(unittest.TestCase):
     def save(self,local=True,tunnel=True,localname='nas',tunnelname='nas-web',port=8080):
         self.m.save(dict(device_id=self.did,local=dict(enabled=local,hostname=localname),
                          tunnel=dict(enabled=tunnel,hostname=tunnelname,port=port,protocol='http')))
+    def test_connect_saves_token_and_keeps_existing_on_blank(self):
+        from cloudflare_sync import connect_cloudflare
+        api=SetupAPI();token_file=Path(self.temp.name)/'tunnel-token'
+        result=connect_cloudflare(dict(api_token='brand-new-cloudflare-token',tunnel=False),self.cfg,lambda token:api,token_file)
+        self.assertEqual(result,dict(configured=True,zone='chancecox.com',tunnel_configured=True))
+        saved=json.loads(self.cfg.read_text())
+        self.assertEqual(saved['api_token'],'brand-new-cloudflare-token')
+        self.assertFalse(token_file.exists())
+        api2=SetupAPI()
+        kept=connect_cloudflare(dict(api_token='',tunnel=False),self.cfg,lambda token:api2,token_file)
+        self.assertEqual(kept['zone'],'chancecox.com')
+        self.assertEqual(json.loads(self.cfg.read_text())['api_token'],'brand-new-cloudflare-token')
+    def test_connect_creates_tunnel_and_connector_token(self):
+        from cloudflare_sync import connect_cloudflare
+        cfg=Path(self.temp.name)/'fresh.json';token_file=Path(self.temp.name)/'tunnel-token'
+        api=SetupAPI()
+        result=connect_cloudflare(dict(api_token='brand-new-cloudflare-token',tunnel=True),cfg,lambda token:api,token_file)
+        self.assertTrue(result['tunnel_configured'])
+        saved=json.loads(cfg.read_text())
+        self.assertEqual(saved['tunnel_id'],'new-tunnel-id')
+        self.assertEqual(token_file.read_text(),'connector-token-new-tunn')
+    def test_connect_validation_errors(self):
+        from cloudflare_sync import connect_cloudflare, CloudflareError
+        cfg=Path(self.temp.name)/'validate.json';token_file=Path(self.temp.name)/'tunnel-token'
+        with self.assertRaisesRegex(ValueError,'API token'):
+            connect_cloudflare(dict(api_token='short',tunnel=False),cfg,lambda token:SetupAPI(),token_file)
+        class NoZone(SetupAPI):
+            def call(self,method,path,body=None):
+                if method=='GET' and path.startswith('/zones?'): return []
+                return super().call(method,path,body)
+        with self.assertRaisesRegex(CloudflareError,'active Cloudflare zone'):
+            connect_cloudflare(dict(api_token='brand-new-cloudflare-token',tunnel=False),cfg,lambda token:NoZone(),token_file)
+        cfg.write_text(json.dumps(dict(api_token='old-token-value-here',zone_id='other-zone',zone_name='chancecox.com',account_id='account')))
+        with self.assertRaisesRegex(CloudflareError,'Zone changed'):
+            connect_cloudflare(dict(api_token='brand-new-cloudflare-token',tunnel=False),cfg,lambda token:SetupAPI(),token_file)
+    def test_manager_connect_queues_sync(self):
+        from cloudflare_sync import connect_cloudflare
+        api=SetupAPI();token_file=Path(self.temp.name)/'mgr-token'
+        self.m.api_factory=lambda token:api
+        with mock.patch('cloudflare_sync.TOKEN_FILE',token_file):
+            self.m.wake.clear()
+            result=self.m.connect(dict(api_token='brand-new-cloudflare-token',tunnel=False))
+        self.assertTrue(result['configured'])
+        self.assertTrue(self.m.wake.is_set())
     def test_mac_follows_ip_and_cloudflare_is_idempotent(self):
         self.save();self.m.sync_once()
         count=len(self.api.writes)
@@ -143,6 +237,20 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(d['last_seen'],prior);self.assertEqual(d['ip'],'192.168.86.20')
     def test_no_token_exposed(self):
         self.assertNotIn('test-secret',json.dumps(self.m.public_state()))
+    def test_save_domain_updates_suffix(self):
+        result=self.m.save_domain(dict(suffix='lan.example.org'))
+        self.assertEqual(result['suffix'],'lan.example.org')
+        self.assertEqual(self.m.suffix(),'lan.example.org')
+        self.assertEqual(self.m.public_state()['suffix'],'lan.example.org')
+        self.save(local=True,tunnel=False,localname='nas')
+        with storage.connect(self.db) as db:
+            row=db.execute("SELECT hostname FROM cf_routes WHERE kind='local'").fetchone()
+        self.assertEqual(row['hostname'],'nas.lan.example.org')
+        self.m.save(dict(device_id=self.did,local=dict(enabled=False,hostname=''),
+                         tunnel=dict(enabled=True,hostname='app.cdn.example.com',port=443,protocol='https')))
+        with storage.connect(self.db) as db:
+            row=db.execute("SELECT hostname FROM cf_routes WHERE kind='tunnel'").fetchone()
+        self.assertEqual(row['hostname'],'app.cdn.example.com')
     def test_validation_and_hostname_collision(self):
         for value in ('*.house.chancecox.com','nas.evil.com','a.b.house.chancecox.com','https://nas.house.chancecox.com/path'):
             with self.assertRaises(ValueError): hostname(value)
@@ -235,6 +343,80 @@ class TunnelEditingTests(unittest.TestCase):
         self.assertEqual(self.api.records[0]['content'],TunnelEditingAPI.TID+'.cfargotunnel.com')
         link=self.m.public_state()['tunnel_links'][0]
         self.assertEqual((link['hostname'],link['device_id']),('files.other.example',self.did))
+
+    def test_create_multiple_hostnames_on_same_computer(self):
+        self.api=RouteCreationAPI();self.m=Manager(self.db,self.cfg,lambda token:self.api);self.m.init()
+        first=self.m.create_tunnel_route(dict(tunnel_id=TunnelEditingAPI.TID,zone_id='zone2',hostname='files',
+                                               device_id=self.did,protocol='http',port=80))
+        second=self.m.create_tunnel_route(dict(tunnel_id=TunnelEditingAPI.TID,zone_id='zone2',hostname='photos',
+                                                device_id=self.did,protocol='http',port=8080))
+        links=self.m.public_state()['tunnel_links']
+        self.assertEqual({first['hostname'],second['hostname']},{'files.other.example','photos.other.example'})
+        self.assertEqual({link['device_id'] for link in links},{self.did})
+        self.assertEqual(len(links),2)
+
+    def test_create_nested_hostname_under_selected_zone(self):
+        self.api=RouteCreationAPI();self.m=Manager(self.db,self.cfg,lambda token:self.api);self.m.init()
+        result=self.m.create_tunnel_route(dict(tunnel_id=TunnelEditingAPI.TID,zone_id='zone',hostname='files.house',
+                                                device_id=self.did,protocol='http',port=80))
+        self.assertEqual(result['hostname'],'files.house.chancecox.com')
+
+    def test_delete_public_hostname_and_dns(self):
+        self.api=RouteCreationAPI();self.m=Manager(self.db,self.cfg,lambda token:self.api);self.m.init()
+        created=self.m.create_tunnel_route(dict(tunnel_id=TunnelEditingAPI.TID,zone_id='zone2',hostname='files',
+                                                 device_id=self.did,protocol='http',port=80))
+        detail=self.m.delete_tunnel_hostname(dict(tunnel_id=TunnelEditingAPI.TID,hostname=created['hostname'],path=''))
+        self.assertFalse(any(r.get('hostname')==created['hostname'] for r in detail['config']['ingress']))
+        self.assertEqual(self.api.records,[])
+        self.assertEqual(self.m.public_state()['tunnel_links'],[])
+
+    def test_delete_tunnel_refuses_homescan_and_removes_other(self):
+        with self.assertRaisesRegex(ValueError,'HomeScan tunnel'):
+            self.m.delete_tunnel(dict(tunnel_id=TunnelEditingAPI.TID))
+        self.m.save_tunnel_link(dict(tunnel_id=TunnelEditingAPI.OTHER,hostname='ha.other.example',path='',device_id=self.did))
+        self.assertEqual(len(self.m.public_state()['tunnel_links']),1)
+        self.assertEqual(self.m.delete_tunnel(dict(tunnel_id=TunnelEditingAPI.OTHER)),{'ok':True})
+        self.assertTrue(self.api.deleted)
+        self.assertEqual(self.m.public_state()['tunnel_links'],[])
+
+    def test_delete_hostname_protects_homescan_owned_ingress(self):
+        with storage.connect(self.db) as db:
+            db.execute("INSERT INTO cf_resources VALUES('route','docs.example.com','tunnel',NULL)")
+        with self.assertRaisesRegex(ValueError,'device settings'):
+            self.m.delete_tunnel_hostname(dict(tunnel_id=TunnelEditingAPI.TID,hostname='docs.example.com',path=''))
+        self.assertEqual(self.api.config['ingress'][0]['hostname'],'docs.example.com')
+
+    def test_delete_tunnel_rejects_local_config(self):
+        self.api.other['config_src']='local'
+        with self.assertRaisesRegex(ValueError,'local configuration'):
+            self.m.delete_tunnel(dict(tunnel_id=TunnelEditingAPI.OTHER))
+
+    def test_list_tunnels_marks_homescan_tunnel(self):
+        listed=self.m.list_tunnels()
+        self.assertTrue(listed['configured'])
+        self.assertEqual(listed['tunnels'][0]['id'],TunnelEditingAPI.TID)
+        self.assertTrue(listed['tunnels'][0]['homescan'])
+        self.assertTrue(listed['tunnels'][0]['editable'])
+        self.assertEqual(listed['tunnels'][0]['hostnames'][0]['hostname'],'docs.example.com')
+
+class HelperTests(unittest.TestCase):
+    def test_hostname_and_private_ip_helpers(self):
+        from cloudflare_sync import hostname, hostname_under_zone, normalize_suffix, private_ip
+        self.assertEqual(hostname('nas'),'nas.house.chancecox.com')
+        self.assertEqual(hostname('https://nas.house.chancecox.com'),'nas.house.chancecox.com')
+        self.assertEqual(hostname('nas-web', kind='tunnel'),'nas-web.house.chancecox.com')
+        self.assertEqual(hostname('app.other.example.com', kind='tunnel'),'app.other.example.com')
+        self.assertEqual(hostname('nas', suffix='lan.example.org'),'nas.lan.example.org')
+        self.assertEqual(hostname_under_zone('files','example.com'),'files.example.com')
+        self.assertEqual(hostname_under_zone('files.house','chancecox.com'),'files.house.chancecox.com')
+        self.assertEqual(hostname_under_zone('files.house.chancecox.com','chancecox.com'),'files.house.chancecox.com')
+        self.assertEqual(normalize_suffix('House.ChanceCox.com'),'house.chancecox.com')
+        self.assertEqual(private_ip('10.1.2.3'),'10.1.2.3')
+        with self.assertRaises(ValueError): private_ip('8.8.8.8')
+        with self.assertRaises(ValueError): hostname('app.other.example.com')
+        with self.assertRaises(ValueError): hostname_under_zone('example.com','example.com')
+        with self.assertRaises(ValueError): hostname_under_zone('','example.com')
+        self.assertEqual(hostname_under_zone('files.house','example.com'),'files.house.example.com')
 
 class MigrationTests(unittest.TestCase):
     def test_legacy_rows_merge_by_mac_with_history_preserved(self):

@@ -3,7 +3,11 @@
 !storage.py
 !cloudflare_sync.py
 !ws.py
+!ha.py
+!auth.py
 !index.html
+!login.html
+!login.js
 !app.js
 !style.css
 !deco.py

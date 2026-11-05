@@ -7,7 +7,9 @@ import storage
 from storage import device_states
 from cloudflare_sync import Manager, CloudflareError
 import deco
+import auth
 from ws import Hub
+from ha import Cluster
 
 DB = os.getenv('DB_PATH', '/data/homescan.db')
 MODE = os.getenv('SCAN_MODE', 'nmap')
@@ -16,23 +18,31 @@ NETWORK = os.getenv('SCAN_NETWORK', '192.168.1.0/24')
 INTERVAL = 60
 CLOUDFLARE = Manager(DB)
 HUB = Hub()
+CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish())
 
 def now(): return storage.now()
 def connect(): return storage.connect(DB)
 def devices_payload():
     result = storage.inventory(DB)
     result.update(mode=MODE,network=NETWORK if MODE=='nmap' else 'Home network',
-                  cloudflare=CLOUDFLARE.public_state(),deco=deco.public_state())
+                  cloudflare=CLOUDFLARE.public_state(),deco=deco.public_state(),
+                  ha=CLUSTER.public_state())
     return json.dumps(result)
 
 def publish():
     HUB.broadcast(devices_payload())
 
 def init():
-    global CLOUDFLARE
+    global CLOUDFLARE, CLUSTER
     storage.init(DB)
+    auth.init()
     CLOUDFLARE = Manager(DB, on_update=publish)
     CLOUDFLARE.init()
+    cfg = {}
+    try: cfg = CLOUDFLARE.config()
+    except (OSError, ValueError): pass
+    node_id = cfg.get('installation_id') or None
+    CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish(), node_id=node_id)
 
 def record(hosts, started=None, error=None, source='network'):
     storage.record_batches(DB,[dict(hosts=hosts,started=started,error=error,source=source)])
@@ -43,6 +53,9 @@ def scanner():
     net = ipaddress.IPv4Network(NETWORK,strict=False)
     while True:
         tick = time.monotonic()
+        if not CLUSTER.is_leader():
+            time.sleep(max(1, INTERVAL/2))
+            continue
         started = now()
         try:
             result = subprocess.run(['nmap','-sn','-R','--host-timeout','8s','-oX','-',str(net)],capture_output=True,text=True,timeout=50,check=True)
@@ -58,13 +71,15 @@ def scanner():
         time.sleep(max(0,INTERVAL-(time.monotonic()-tick)))
 
 class Handler(BaseHTTPRequestHandler):
-    def send(self, code, body, content_type='application/json'):
+    def send(self, code, body, content_type='application/json', headers=None):
         self.send_response(code)
         self.send_header('Content-Type',content_type)
         self.send_header('Cache-Control','no-store')
         self.send_header('X-Content-Type-Options','nosniff')
         self.send_header('X-Frame-Options','DENY')
         self.send_header('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.send_header('Content-Length',str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -83,14 +98,52 @@ class Handler(BaseHTTPRequestHandler):
                 and self.headers.get('Sec-Fetch-Site','same-origin') not in ('cross-site','same-site')
                 and self.headers.get('Content-Type','').split(';')[0]=='application/json')
 
+    def session_token(self):
+        return auth.parse_cookie(self.headers.get('Cookie',''))
+
+    def current_user(self):
+        return auth.session_user(self.session_token())
+
+    def require_user(self):
+        user = self.current_user()
+        if user: return user
+        accept = self.headers.get('Accept','')
+        if 'text/html' in accept or self.path in ('/','/index.html'):
+            self.send_response(302)
+            self.send_header('Location','/login')
+            self.send_header('Cache-Control','no-store')
+            self.end_headers()
+            return None
+        self.send(401,b'{"error":"Sign in required."}')
+        return None
+
     def do_GET(self):
         parsed = urlsplit(self.path)
-        assets={'/':('index.html','text/html; charset=utf-8'),'/app.js':('app.js','application/javascript; charset=utf-8'),'/style.css':('style.css','text/css; charset=utf-8')}
-        if parsed.path in assets:
-            name,mime = assets[parsed.path]
+        if parsed.path=='/login':
+            if self.current_user():
+                self.send_response(302); self.send_header('Location','/'); self.end_headers(); return
+            return self.send(200,Path(__file__).with_name('login.html').read_bytes(),'text/html; charset=utf-8')
+        if parsed.path in ('/style.css','/login.js'):
+            name = 'style.css' if parsed.path.endswith('.css') else 'login.js'
+            mime = 'text/css; charset=utf-8' if name.endswith('.css') else 'application/javascript; charset=utf-8'
             return self.send(200,Path(__file__).with_name(name).read_bytes(),mime)
-        if self.path=='/ws': return HUB.serve(self, devices_payload)
+        if parsed.path in ('/','/app.js','/index.html'):
+            if not self.require_user(): return
+            name = 'index.html' if parsed.path in ('/','/index.html') else 'app.js'
+            mime = 'text/html; charset=utf-8' if name=='index.html' else 'application/javascript; charset=utf-8'
+            return self.send(200,Path(__file__).with_name(name).read_bytes(),mime)
+        if self.path=='/ws':
+            if not self.current_user(): return self.send(401,b'{"error":"Sign in required."}')
+            return HUB.serve(self, devices_payload)
+        if self.path=='/ha': return CLUSTER.serve(self)
         if self.path=='/health': return self.send(200,b'{"ok":true}')
+        if self.path=='/api/me':
+            user = self.current_user()
+            if not user: return self.send(401,b'{"error":"Sign in required."}')
+            return self.send(200,json.dumps({'username':user}).encode())
+        if not self.current_user() and parsed.path.startswith('/api/'):
+            return self.send(401,b'{"error":"Sign in required."}')
+        if self.path=='/api/ha': return self.send(200,json.dumps(CLUSTER.public_state()).encode())
         if self.path=='/api/cloudflare': return self.send(200,json.dumps(CLOUDFLARE.public_state()).encode())
         if self.path=='/api/cloudflare/tunnels': return self.send(200,json.dumps(CLOUDFLARE.list_tunnels()).encode())
         if self.path=='/api/cloudflare/zones': return self.send(200,json.dumps(CLOUDFLARE.list_zones()).encode())
@@ -109,14 +162,36 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200,devices_payload().encode())
 
     def do_POST(self):
-        if self.path in ('/api/cloudflare/settings','/api/cloudflare/sync','/api/cloudflare/tunnels/update','/api/cloudflare/tunnels/link','/api/cloudflare/tunnels/create-route','/api/deco/settings'):
+        if self.path=='/api/login':
+            try:
+                body = self.body()
+                result = auth.login(body.get('username'), body.get('password'), bool(body.get('remember')))
+                headers = {'Set-Cookie': auth.cookie_header(result['token'], result['remember'], result['max_age'])}
+                return self.send(200, json.dumps({'ok':True,'username':result['username']}).encode(), headers=headers)
+            except ValueError as exc:
+                return self.send(401, json.dumps({'error':str(exc)}).encode())
+            except Exception:
+                return self.send(500, b'{"error":"Sign in failed."}')
+        if self.path=='/api/logout':
+            auth.logout(self.session_token())
+            return self.send(200, b'{"ok":true}', headers={'Set-Cookie': auth.clear_cookie_header()})
+        if self.path in ('/api/cloudflare/settings','/api/cloudflare/domain','/api/cloudflare/sync','/api/cloudflare/connect','/api/cloudflare/tunnels/update','/api/cloudflare/tunnels/link','/api/cloudflare/tunnels/create-route','/api/cloudflare/tunnels/delete','/api/cloudflare/tunnels/delete-hostname','/api/deco/settings'):
             if not self.same_origin(): return self.send(403,b'{"error":"Use the HomeScan dashboard to change settings."}')
+            if not self.current_user(): return self.send(401,b'{"error":"Sign in required."}')
             try:
                 body = self.body()
                 if self.path=='/api/deco/settings':
                     state = deco.save_settings(body)
                     publish()
                     return self.send(200,json.dumps(dict(ok=True,**state)).encode())
+                if self.path=='/api/cloudflare/domain':
+                    result = CLOUDFLARE.save_domain(body)
+                    publish()
+                    return self.send(200,json.dumps(result).encode())
+                if self.path=='/api/cloudflare/connect':
+                    result = CLOUDFLARE.connect(body)
+                    publish()
+                    return self.send(200,json.dumps(dict(ok=True,**result)).encode())
                 if self.path=='/api/cloudflare/tunnels/update':
                     result = CLOUDFLARE.update_tunnel(body)
                     publish()
@@ -127,6 +202,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(200,json.dumps(result).encode())
                 if self.path=='/api/cloudflare/tunnels/create-route':
                     result=CLOUDFLARE.create_tunnel_route(body)
+                    publish()
+                    return self.send(200,json.dumps(result).encode())
+                if self.path=='/api/cloudflare/tunnels/delete-hostname':
+                    result=CLOUDFLARE.delete_tunnel_hostname(body)
+                    publish()
+                    return self.send(200,json.dumps(result).encode())
+                if self.path=='/api/cloudflare/tunnels/delete':
+                    result=CLOUDFLARE.delete_tunnel(body)
                     publish()
                     return self.send(200,json.dumps(result).encode())
                 if self.path.endswith('/settings'): CLOUDFLARE.save(body)
@@ -140,6 +223,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path!='/api/scan' or MODE!='agent': return self.send(404,b'{}')
         if not TOKEN or not secrets.compare_digest(self.headers.get('Authorization',''),'Bearer '+TOKEN):
             return self.send(401,b'{"error":"Unauthorized"}')
+        if not CLUSTER.is_leader():
+            return self.send(503,json.dumps({'error':'This HomeScan node is on standby. Point the scanner at '+CLUSTER.hostname+':'+str(CLUSTER.port)+'.','ha':CLUSTER.public_state()}).encode())
         try:
             body = self.body()
             batches = body.get('sources')
@@ -170,5 +255,6 @@ if __name__=='__main__':
     init()
     threading.Thread(target=CLOUDFLARE.run,daemon=True).start()
     CLOUDFLARE.wake.set()
+    threading.Thread(target=CLUSTER.run,daemon=True,name='homescan-ha').start()
     if MODE=='nmap': threading.Thread(target=scanner,daemon=True).start()
     ThreadingHTTPServer(('0.0.0.0',80),Handler).serve_forever()

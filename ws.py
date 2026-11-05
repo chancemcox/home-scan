@@ -1,11 +1,14 @@
 """Minimal RFC6455 WebSocket hub for dashboard push updates."""
 import base64
 import hashlib
+import socket
 import struct
 import threading
 
 GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 OP_TEXT, OP_CLOSE, OP_PING, OP_PONG = 0x1, 0x8, 0x9, 0xA
+# Keep quieter than Docker Desktop / mobile idle timeouts (~2 minutes).
+PING_INTERVAL = 20
 
 
 def accept_key(key):
@@ -100,11 +103,27 @@ class Hub:
         handler.send_header('Sec-WebSocket-Accept', accept_key(key))
         handler.end_headers()
         client = Client(handler.connection)
+        try:
+            client.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if hasattr(socket, 'TCP_KEEPIDLE'):
+                client.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            if hasattr(socket, 'TCP_KEEPINTVL'):
+                client.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            if hasattr(socket, 'TCP_KEEPCNT'):
+                client.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        except OSError:
+            pass
+        client.sock.settimeout(PING_INTERVAL)
         self.add(client)
         try:
             client.send_text(snapshot())
             while client.alive:
-                opcode, payload = client.recv()
+                try:
+                    opcode, payload = client.recv()
+                except TimeoutError:
+                    try: client.send(OP_PING)
+                    except OSError: break
+                    continue
                 if opcode == OP_CLOSE: break
                 if opcode == OP_PING: client.send(OP_PONG, payload)
         except (OSError, ConnectionError, struct.error):

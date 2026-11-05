@@ -12,8 +12,10 @@ import uuid
 from pathlib import Path
 import storage
 
-SUFFIX = 'house.chancecox.com'
+DEFAULT_SUFFIX = 'house.chancecox.com'
+SUFFIX = DEFAULT_SUFFIX  # compatibility alias; prefer Manager.suffix() / normalize_suffix()
 OLD_SUFFIX = 'local.chancecox.com'
+LABEL_RE = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
 CONFIG = Path(os.getenv('CLOUDFLARE_CONFIG','/data/cloudflare.json'))
 TOKEN_FILE = Path(os.getenv('CLOUDFLARE_TUNNEL_TOKEN','/run/homescan-tunnel/token'))
 
@@ -43,18 +45,72 @@ class API:
         return result.get('result')
 
 
-def hostname(value):
+def normalize_suffix(value):
+    name = str(value or '').strip().lower().rstrip('.')
+    if name.startswith('*.'): name = name[2:]
+    parts = name.split('.')
+    if len(parts) < 2 or not all(LABEL_RE.fullmatch(p) for p in parts):
+        raise ValueError('Enter a base domain such as house.example.com')
+    return name
+
+
+def _parse_hostname_input(value):
     name = str(value or '').strip().lower().rstrip('.')
     if '://' in name:
         parsed = urllib.parse.urlsplit(name)
         if parsed.scheme not in ('http','https') or parsed.path not in ('','/') or parsed.query or parsed.fragment or parsed.port or parsed.username:
             raise ValueError('Enter a hostname without a port or path.')
         name = parsed.hostname or ''
-    if '.' not in name: name += '.'+SUFFIX
-    label = name.removesuffix('.'+SUFFIX)
-    if name != label+'.'+SUFFIX or not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',label):
-        raise ValueError('Use a single hostname such as nas.'+SUFFIX)
     return name
+
+
+def hostname(value, suffix=None, kind='local'):
+    """Normalize a device hostname.
+
+    Local DNS must be a single label under the configured base domain.
+    Tunnel hostnames may be that short form or any full hostname on a Cloudflare zone.
+    """
+    suffix = normalize_suffix(suffix or DEFAULT_SUFFIX)
+    name = _parse_hostname_input(value)
+    if not name:
+        raise ValueError('Enter a hostname.')
+    if '.' not in name:
+        name += '.'+suffix
+    parts = name.split('.')
+    if not all(LABEL_RE.fullmatch(p) for p in parts):
+        raise ValueError('Hostnames may only use letters, numbers, and hyphens.')
+    if kind == 'tunnel':
+        if len(parts) < 2:
+            raise ValueError('Enter a full hostname on a Cloudflare domain, or a short label under '+suffix)
+        return name
+    label = name.removesuffix('.'+suffix)
+    if name != label+'.'+suffix or not LABEL_RE.fullmatch(label) or '.' in label:
+        raise ValueError('Use a single hostname such as nas.'+suffix)
+    return name
+
+
+def hostname_under_zone(value, zone_name):
+    """Build a tunnel public hostname under an accessible Cloudflare zone."""
+    zone = str(zone_name or '').strip().lower().rstrip('.')
+    if not zone or not all(LABEL_RE.fullmatch(p) for p in zone.split('.')):
+        raise ValueError('Choose an accessible domain from this Cloudflare account.')
+    raw = _parse_hostname_input(value)
+    if not raw:
+        raise ValueError('Enter a hostname such as files or files.house')
+    if raw == zone or raw.endswith('.'+zone):
+        relative = '' if raw == zone else raw[:-(len(zone)+1)]
+        parts = relative.split('.') if relative else []
+    else:
+        parts = raw.split('.')
+    if not parts or not all(LABEL_RE.fullmatch(p) for p in parts):
+        raise ValueError('Use a hostname such as files or files.house under '+zone)
+    return '.'.join(parts)+'.'+zone
+
+
+def zone_candidates_for_suffix(suffix):
+    suffix = normalize_suffix(suffix)
+    parts = suffix.split('.')
+    return ['.'.join(parts[i:]) for i in range(len(parts)-1)]
 
 
 def private_ip(value):
@@ -100,6 +156,22 @@ class Manager:
         try: return json.loads(self.config_path.read_text())
         except FileNotFoundError: return {}
 
+    def suffix(self):
+        try: cfg = self.config()
+        except (ValueError, OSError): cfg = {}
+        try: return normalize_suffix(cfg.get('suffix') or DEFAULT_SUFFIX)
+        except ValueError: return DEFAULT_SUFFIX
+
+    def save_domain(self, body):
+        """Persist the dashboard base domain used for local DNS and short tunnel labels."""
+        suffix = normalize_suffix(body.get('suffix') or body.get('domain'))
+        with self.lock:
+            try: cfg = self.config()
+            except (ValueError, OSError): cfg = {}
+            cfg['suffix'] = suffix
+            atomic_json(self.config_path, cfg)
+        return dict(ok=True, suffix=suffix)
+
     def public_state(self):
         try: cfg = self.config()
         except (ValueError,OSError): cfg = {}
@@ -108,7 +180,7 @@ class Manager:
             links = [dict(r) for r in db.execute('SELECT * FROM cf_tunnel_links')]
         return dict(configured=bool(cfg.get('api_token')),zone=cfg.get('zone_name'),
                     tunnel_id=cfg.get('tunnel_id') or '',
-                    tunnel_configured=bool(cfg.get('tunnel_id')),suffix=SUFFIX,routes=routes,tunnel_links=links)
+                    tunnel_configured=bool(cfg.get('tunnel_id')),suffix=self.suffix(),routes=routes,tunnel_links=links)
 
     def list_tunnels(self):
         """Account tunnel inventory for the settings UI. Soft-fails without raising."""
@@ -294,14 +366,12 @@ class Manager:
 
     def create_tunnel_route(self, body):
         tunnel_id=self._tunnel_id(body.get('tunnel_id'));zone_id=str(body.get('zone_id') or '')
-        did=str(body.get('device_id') or '');label=str(body.get('hostname') or '').strip().lower().rstrip('.')
+        did=str(body.get('device_id') or '')
         protocol=str(body.get('protocol') or 'http')
         if protocol not in ('http','https'): raise ValueError('Choose HTTP or HTTPS for the origin.')
         try: port=int(body.get('port',80))
         except (TypeError,ValueError): raise ValueError('Port must be between 1 and 65535.') from None
         if not 1<=port<=65535: raise ValueError('Port must be between 1 and 65535.')
-        if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',label):
-            raise ValueError('Use a single hostname label such as files.')
         with self.lock,storage.connect(self.db_path) as db:
             device=db.execute('SELECT * FROM devices WHERE device_id=?',(did,)).fetchone()
             if not device or not device['mac'] or not did.startswith('mac:'):
@@ -310,7 +380,7 @@ class Manager:
         zone=api.call('GET',f'/zones/{zone_id}') or {}
         if not zone.get('name') or (zone.get('account') or {}).get('id')!=cfg['account_id']:
             raise ValueError('Choose an accessible domain from this Cloudflare account.')
-        name=label+'.'+zone['name'].lower().rstrip('.')
+        name=hostname_under_zone(body.get('hostname'), zone['name'])
         base=f"/accounts/{cfg['account_id']}/cfd_tunnel/{tunnel_id}"
         tunnel=api.call('GET',base) or {}
         if tunnel.get('config_src')!='cloudflare': raise ValueError('Choose a remotely managed tunnel.')
@@ -332,6 +402,87 @@ class Manager:
             api.call('POST',f'/zones/{zone_id}/dns_records',dict(type='CNAME',name=name,content=target,proxied=True,ttl=1,
                                                                  comment='homescan:tunnel-route'))
         return self.save_tunnel_link(dict(tunnel_id=tunnel_id,hostname=name,path='',device_id=did)) | {'hostname':name}
+
+    def _cleanup_tunnel_dns(self, api, cfg, tunnel_id, hostname):
+        """Best-effort removal of CNAMEs that pointed this hostname at the tunnel."""
+        hostname = str(hostname or '').strip().lower().rstrip('.')
+        if not hostname or '.' not in hostname: return
+        target = (tunnel_id+'.cfargotunnel.com').lower()
+        labels = hostname.split('.')
+        zone = None
+        for i in range(len(labels)-1):
+            name = '.'.join(labels[i:])
+            try:
+                rows = api.call('GET','/zones?'+urllib.parse.urlencode({'name':name,'status':'active','per_page':5})) or []
+            except CloudflareError:
+                continue
+            for candidate in rows:
+                if candidate.get('name')==name and (candidate.get('account') or {}).get('id')==cfg['account_id']:
+                    zone = candidate; break
+            if zone: break
+        if not zone: return
+        try:
+            records = api.call('GET',f"/zones/{zone['id']}/dns_records?"+urllib.parse.urlencode({'name':hostname,'per_page':100})) or []
+        except CloudflareError:
+            return
+        for record in records:
+            content = str(record.get('content') or '').rstrip('.').lower()
+            if record.get('type')=='CNAME' and content==target and record.get('id'):
+                try: api.call('DELETE',f"/zones/{zone['id']}/dns_records/{record['id']}")
+                except CloudflareError: pass
+
+    def delete_tunnel_hostname(self, body):
+        tunnel_id = self._tunnel_id(body.get('tunnel_id'))
+        key = (str(body.get('hostname') or ''), str(body.get('path') or ''))
+        if not key[0] and not key[1]:
+            raise ValueError('Choose a public hostname to delete.')
+        with self.lock:
+            cfg, api = self._tunnel_api()
+            base = f"/accounts/{cfg['account_id']}/cfd_tunnel/{tunnel_id}"
+            tunnel = api.call('GET', base) or {}
+            if tunnel.get('config_src') != 'cloudflare':
+                raise ValueError('Locally managed tunnels must be edited in their local configuration.')
+            if tunnel_id == cfg.get('tunnel_id'):
+                with storage.connect(self.db_path) as db:
+                    owned = db.execute("SELECT 1 FROM cf_resources WHERE kind='tunnel' AND hostname=?",(key[0],)).fetchone()
+                if owned:
+                    raise ValueError('HomeScan-managed ingress rules must be removed from their device settings.')
+            response = api.call('GET', base+'/configurations') or {}
+            config = response.get('config') or {'ingress':[{'service':'http_status:404'}]}
+            rules = list(config.get('ingress') or [])
+            matches = [i for i, rule in enumerate(rules) if self._rule_key(rule)==key]
+            if len(matches) != 1:
+                raise ValueError('That hostname was not found as a unique ingress rule.')
+            del rules[matches[0]]
+            desired = self._tunnel_config(dict(config, ingress=rules))
+            api.call('PUT', base+'/configurations', {'config':desired})
+            if key[0]: self._cleanup_tunnel_dns(api, cfg, tunnel_id, key[0])
+            with storage.connect(self.db_path) as db:
+                db.execute('DELETE FROM cf_tunnel_links WHERE tunnel_id=? AND hostname=? AND path=?',(tunnel_id,*key))
+        return self.get_tunnel(tunnel_id)
+
+    def delete_tunnel(self, body):
+        tunnel_id = self._tunnel_id(body.get('tunnel_id'))
+        with self.lock:
+            cfg, api = self._tunnel_api()
+            if tunnel_id == cfg.get('tunnel_id'):
+                raise ValueError('The HomeScan tunnel cannot be deleted from the dashboard.')
+            base = f"/accounts/{cfg['account_id']}/cfd_tunnel/{tunnel_id}"
+            tunnel = api.call('GET', base) or {}
+            if tunnel.get('config_src') != 'cloudflare':
+                raise ValueError('Locally managed tunnels must be deleted in their local configuration.')
+            try:
+                response = api.call('GET', base+'/configurations') or {}
+                ingress = (response.get('config') or {}).get('ingress') or []
+            except CloudflareError:
+                ingress = []
+            hostnames = [rule.get('hostname') for rule in ingress if rule.get('hostname')]
+            api.call('DELETE', base)
+            for name in hostnames:
+                self._cleanup_tunnel_dns(api, cfg, tunnel_id, name)
+            with storage.connect(self.db_path) as db:
+                db.execute('DELETE FROM cf_tunnel_links WHERE tunnel_id=?',(tunnel_id,))
+        return dict(ok=True)
 
     def _link_status(self, link, state, message='', ip=None):
         with storage.connect(self.db_path) as db:
@@ -374,7 +525,8 @@ class Manager:
                     raise ValueError('Invalid Cloudflare settings.')
                 enabled = item.get('enabled',False)
                 old = db.execute('SELECT * FROM cf_routes WHERE device_id=? AND kind=?',(did,kind)).fetchone()
-                name = hostname(item.get('hostname')) if enabled else (old['hostname'] if old else '')
+                suffix = self.suffix()
+                name = hostname(item.get('hostname'), suffix=suffix, kind=kind) if enabled else (old['hostname'] if old else '')
                 protocol = item.get('protocol','http')
                 if protocol not in ('http','https'): raise ValueError('Choose HTTP or HTTPS for the origin.')
                 try: port = int(item.get('port',80))
@@ -406,8 +558,57 @@ class Manager:
         with storage.connect(self.db_path) as db:
             return [dict(r) for r in db.execute('SELECT * FROM cf_resources WHERE route_id=?',(rid,))]
 
-    def dns_records(self, api, cfg, name):
-        return api.call('GET',f"/zones/{cfg['zone_id']}/dns_records?"+urllib.parse.urlencode({'name':name,'per_page':100})) or []
+    def zone_for(self, api, cfg, name):
+        """Find the Cloudflare zone that should own a hostname."""
+        name = str(name or '').strip().lower().rstrip('.')
+        if not name or '.' not in name:
+            raise CloudflareError('Hostname is missing a Cloudflare zone.')
+        account = cfg.get('account_id')
+        zone_name = str(cfg.get('zone_name') or '').strip().lower().rstrip('.')
+        if cfg.get('zone_id') and zone_name and (name == zone_name or name.endswith('.'+zone_name)):
+            return dict(id=cfg['zone_id'], name=zone_name, account={'id': account})
+        labels = name.split('.')
+        for i in range(len(labels)-1):
+            candidate = '.'.join(labels[i:])
+            try:
+                rows = api.call('GET','/zones?'+urllib.parse.urlencode({'name':candidate,'status':'active','per_page':5})) or []
+            except CloudflareError:
+                continue
+            for zone in rows:
+                if zone.get('name') == candidate and (zone.get('account') or {}).get('id') == account:
+                    return zone
+        raise CloudflareError('No Cloudflare zone accessible to this token covers '+name+'.')
+
+    def dns_records(self, api, cfg, name, zone=None):
+        zone = zone or self.zone_for(api, cfg, name)
+        return api.call('GET',f"/zones/{zone['id']}/dns_records?"+urllib.parse.urlencode({'name':name,'per_page':100})) or []
+
+    def ensure_ha_dns(self, ip, hostname=None):
+        """Create or point the cluster A record at this node's private LAN IP."""
+        ip = private_ip(ip)
+        suffix = self.suffix()
+        name = str(hostname or ('homescan.'+suffix)).strip().lower().rstrip('.')
+        if not name.endswith('.'+suffix) or name.count('.') < 3:
+            raise ValueError('HA hostname must be under '+suffix)
+        with self.lock:
+            try: cfg = self.config()
+            except (OSError, ValueError): cfg = {}
+            if not cfg.get('api_token') or not cfg.get('account_id'):
+                raise ValueError('Connect Cloudflare before HA failover can update DNS.')
+            api = self.api_factory(cfg['api_token'])
+            zone = self.zone_for(api, cfg, name)
+            matches = self.dns_records(api, cfg, name, zone)
+            foreign = [r for r in matches if r.get('comment') != 'homescan:ha']
+            if foreign:
+                raise CloudflareError(name+' is owned by another DNS record. Remove it or choose another HA hostname.')
+            desired = dict(type='A',name=name,content=ip,proxied=False,ttl=30,comment='homescan:ha')
+            if matches:
+                record = matches[0]
+                if any(record.get(k) != v for k, v in desired.items()):
+                    api.call('PUT', f"/zones/{zone['id']}/dns_records/{record['id']}", desired)
+            else:
+                api.call('POST', f"/zones/{zone['id']}/dns_records", desired)
+        return dict(hostname=name, ip=ip)
 
     def tunnel_rule(self, api, cfg, name, service, route_id=None):
         if not cfg.get('tunnel_id'): raise CloudflareError('Run Cloudflare setup with tunnel support enabled.')
@@ -439,9 +640,12 @@ class Manager:
 
     def cleanup(self, api, cfg, resource):
         name,rid = resource['hostname'],resource['route_id']
-        for record in self.dns_records(api,cfg,name):
-            if record.get('comment')=='homescan:'+rid:
-                api.call('DELETE',f"/zones/{cfg['zone_id']}/dns_records/{record['id']}")
+        try: zone = self.zone_for(api, cfg, name)
+        except CloudflareError: zone = None
+        if zone:
+            for record in self.dns_records(api,cfg,name,zone):
+                if record.get('comment')=='homescan:'+rid:
+                    api.call('DELETE',f"/zones/{zone['id']}/dns_records/{record['id']}")
         if resource['kind']=='tunnel': self.tunnel_rule(api,cfg,name,None)
         with storage.connect(self.db_path) as db:
             db.execute('DELETE FROM cf_resources WHERE route_id=? AND hostname=?',(rid,name))
@@ -461,7 +665,8 @@ class Manager:
         for resource in resources:
             if resource['hostname']!=name or resource['kind']!=route['kind']:
                 self.cleanup(api,cfg,resource)
-        matches = self.dns_records(api,cfg,name)
+        zone = self.zone_for(api, cfg, name)
+        matches = self.dns_records(api,cfg,name,zone)
         if any(r.get('comment')!='homescan:'+route['id'] for r in matches) or len(matches)>1:
             raise CloudflareError('An existing DNS record owns this hostname. Choose another name or remove that record yourself.')
         if route['kind']=='local':
@@ -476,9 +681,9 @@ class Manager:
         record = matches[0] if matches else None
         if record:
             if any(record.get(k)!=v for k,v in desired.items()):
-                record = api.call('PUT',f"/zones/{cfg['zone_id']}/dns_records/{record['id']}",desired)
+                record = api.call('PUT',f"/zones/{zone['id']}/dns_records/{record['id']}",desired)
         else:
-            record = api.call('POST',f"/zones/{cfg['zone_id']}/dns_records",desired)
+            record = api.call('POST',f"/zones/{zone['id']}/dns_records",desired)
         with storage.connect(self.db_path) as db:
             db.execute('UPDATE cf_resources SET record_id=? WHERE route_id=? AND hostname=?',(record['id'],route['id'],name))
         self.status(route,'synced','',ip)
@@ -506,6 +711,13 @@ class Manager:
                 except (CloudflareError,ValueError) as exc: self.status(route,'error',str(exc))
                 except Exception: self.status(route,'error','Sync could not finish. Retrying automatically.')
 
+    def connect(self, body):
+        """Dashboard/API path for adding or rotating the Cloudflare API token."""
+        with self.lock:
+            result = connect_cloudflare(body, self.config_path, self.api_factory, TOKEN_FILE)
+        self.wake.set()
+        return result
+
     def run(self):
         while True:
             self.wake.wait(60)
@@ -524,43 +736,73 @@ def atomic_json(path, value):
     tmp.replace(path)
 
 
-def setup(options):
-    """Only invoked interactively with the token supplied through stdin."""
-    token = str(options.get('api_token','')).strip()
-    if len(token)<20: raise ValueError('Enter a Cloudflare API token.')
-    api = API(token)
-    old = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+def connect_cloudflare(options, config_path=CONFIG, api_factory=API, token_file=TOKEN_FILE):
+    """Validate a Cloudflare API token and persist account/zone settings."""
+    token = str(options.get('api_token') or '').strip()
+    try: old = json.loads(config_path.read_text()) if config_path.exists() else {}
+    except (OSError, ValueError): old = {}
+    if not token: token = str(old.get('api_token') or '').strip()
+    if len(token) < 20: raise ValueError('Enter a Cloudflare API token.')
+    want_tunnel = options.get('tunnel', True)
+    if not isinstance(want_tunnel, bool): raise ValueError('Invalid tunnel option.')
+    if options.get('suffix') not in (None, ''):
+        suffix = normalize_suffix(options.get('suffix'))
+    else:
+        try: suffix = normalize_suffix(old.get('suffix') or DEFAULT_SUFFIX)
+        except ValueError: suffix = DEFAULT_SUFFIX
+    api = api_factory(token)
     zone = None
-    for name in (SUFFIX,'chancecox.com'):
-        zones = api.call('GET','/zones?'+urllib.parse.urlencode({'name':name,'status':'active'})) or []
+    preferred = str(options.get('zone_name') or old.get('zone_name') or '').strip().lower().rstrip('.')
+    candidates = []
+    if preferred: candidates.append(preferred)
+    candidates.extend(zone_candidates_for_suffix(suffix))
+    seen = set()
+    for name in candidates:
+        if name in seen: continue
+        seen.add(name)
+        zones = api.call('GET', '/zones?'+urllib.parse.urlencode({'name':name,'status':'active'})) or []
         if zones:
             zone = zones[0]
             break
-    if not zone: raise CloudflareError('The token cannot access an active chancecox.com zone. Grant Zone Read and DNS Edit.')
-    if old.get('zone_id') and old['zone_id']!=zone['id']:
+    if not zone:
+        # Fall back to any active zone the token can see so non-default domains work.
+        zones = api.call('GET', '/zones?'+urllib.parse.urlencode({'status':'active','per_page':100})) or []
+        if len(zones) == 1:
+            zone = zones[0]
+        elif preferred:
+            exact = [z for z in zones if z.get('name') == preferred]
+            zone = exact[0] if exact else None
+    if not zone:
+        raise CloudflareError('The token cannot access an active Cloudflare zone for '+suffix+'. Grant Zone Read and DNS Edit for that domain.')
+    if old.get('zone_id') and old['zone_id'] != zone['id']:
         raise CloudflareError('Zone changed. Keep the original zone while HomeScan manages existing records.')
-    cfg = dict(old,api_token=token,zone_id=zone['id'],zone_name=zone['name'],account_id=zone['account']['id'])
+    cfg = dict(old, api_token=token, zone_id=zone['id'], zone_name=zone['name'], account_id=zone['account']['id'], suffix=suffix)
     # Store the installation identity before creating anything, so setup retries reuse its tunnel.
-    cfg.setdefault('installation_id',uuid.uuid4().hex)
-    atomic_json(CONFIG,cfg)
-    if options.get('tunnel',True):
+    cfg.setdefault('installation_id', uuid.uuid4().hex)
+    atomic_json(config_path, cfg)
+    if want_tunnel:
         base = f"/accounts/{cfg['account_id']}/cfd_tunnel"
         if not cfg.get('tunnel_id'):
             name = 'homescan-'+cfg['installation_id'][:12]
-            existing = api.call('GET',base+'?'+urllib.parse.urlencode({'name':name,'is_deleted':'false'})) or []
-            exact = [t for t in existing if t.get('name')==name]
-            tunnel = exact[0] if exact else api.call('POST',base,{'name':name,'config_src':'cloudflare'})
+            existing = api.call('GET', base+'?'+urllib.parse.urlencode({'name':name,'is_deleted':'false'})) or []
+            exact = [t for t in existing if t.get('name') == name]
+            tunnel = exact[0] if exact else api.call('POST', base, {'name':name,'config_src':'cloudflare'})
             cfg['tunnel_id'] = tunnel['id']
-            atomic_json(CONFIG,cfg)
+            atomic_json(config_path, cfg)
             if not exact:
-                api.call('PUT',base+'/'+tunnel['id']+'/configurations',{'config':{'ingress':[{'service':'http_status:404'}]}})
-        tunnel_token = api.call('GET',base+'/'+cfg['tunnel_id']+'/token')
-        TOKEN_FILE.parent.mkdir(parents=True,exist_ok=True)
-        temp = TOKEN_FILE.with_suffix('.tmp')
+                api.call('PUT', base+'/'+tunnel['id']+'/configurations', {'config':{'ingress':[{'service':'http_status:404'}]}})
+        tunnel_token = api.call('GET', base+'/'+cfg['tunnel_id']+'/token')
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        temp = token_file.with_suffix('.tmp')
         temp.write_text(tunnel_token)
         temp.chmod(0o644)  # The connector's non-root user reads this dedicated volume.
-        temp.replace(TOKEN_FILE)
-    return dict(configured=True,zone=cfg['zone_name'],tunnel_configured=bool(cfg.get('tunnel_id')))
+        temp.replace(token_file)
+    return dict(configured=True, zone=cfg['zone_name'], tunnel_configured=bool(cfg.get('tunnel_id')))
+
+
+def setup(options):
+    """CLI entry used by configure-cloudflare.ps1 (token on stdin)."""
+    return connect_cloudflare(options)
 
 
 if __name__=='__main__':

@@ -2,9 +2,9 @@
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HomeScan · Network inventory</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body><main>
-<header><div><small class="eyebrow">HOME NETWORK / DEVICE INVENTORY</small><h1>HomeScan<span class="brand-dot">.</span></h1><p>Your devices. The right address, every time.</p></div><div class="header-actions"><span id="status" class="pill">Connecting…</span><button id="settings-button">Settings</button><a id="cloudflare-login" class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in to Cloudflare ↗</a><button id="connection-button">Cloudflare setup</button></div></header>
+<header><div><small class="eyebrow">HOME NETWORK / DEVICE INVENTORY</small><h1>HomeScan<span class="brand-dot">.</span></h1><p>Your devices. The right address, every time.</p></div><div class="header-actions"><span id="status" class="pill">Connecting…</span><button id="settings-button">Settings</button><a id="cloudflare-login" class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in to Cloudflare ↗</a><button id="connection-button">Cloudflare setup</button><button id="logout-button" type="button">Sign out</button></div></header>
 <div class="stats"><div class="card"><span>Devices recorded</span><b id="total">—</b></div><div class="card"><span>Confirmed seen</span><b id="online">—</b></div><div class="card"><span>Cloudflare routes</span><b id="route-count">—</b></div></div>
-<div class="connection-line"><span id="cloud-state">Cloudflare: checking…</span><span id="deco-state">Deco: checking…</span><button id="sync-button" class="text-button">Sync now ↻</button></div>
+<div class="connection-line"><span id="cloud-state">Cloudflare: checking…</span><span id="deco-state">Deco: checking…</span><span id="ha-state">Cluster: checking…</span><button id="sync-button" class="text-button">Sync now ↻</button></div>
 <p id="notice" role="status"></p>
 <section class="panel" id="tunnels-panel" aria-labelledby="tunnels-heading">
 <div class="panel-head"><div><h2 id="tunnels-heading">Cloudflare tunnels</h2><p class="panel-copy">All account tunnels and public hostnames visible to the HomeScan API token.</p></div><div><button id="tunnel-create" type="button">Create tunnel hostname</button><button id="tunnels-refresh" type="button" class="text-button">Refresh ↻</button></div></div>
@@ -18,28 +18,42 @@
 </main>
 <dialog id="device-dialog"><form id="device-form"><div class="dialog-head"><div><small class="eyebrow">DEVICE SETTINGS</small><h2 id="device-title">Cloudflare sync</h2></div><button type="button" class="close" data-close="device-dialog" aria-label="Close device settings">×</button></div><p id="device-identity" class="mono"></p><p id="device-current"></p>
 <fieldset><legend><label class="toggle"><input id="local-enabled" type="checkbox">Local DNS sync</label></legend><p>Resolve this hostname directly to the device’s private LAN IP.</p><label for="local-host">Hostname</label><div class="hostname-input"><input id="local-host" placeholder="nas" autocomplete="off"><span>.house.chancecox.com</span></div><small>DNS only. Reachable from your home network or VPN. DNS does not select a port.</small></fieldset>
-<fieldset><legend><label class="toggle"><input id="tunnel-enabled" type="checkbox">Cloudflare Tunnel</label></legend><p>Publish this web service through a Cloudflare tunnel.</p><label for="tunnel-host">Hostname</label><div class="hostname-input"><input id="tunnel-host" placeholder="nas-web" autocomplete="off"><span>.house.chancecox.com</span></div><div class="split"><div><label for="tunnel-protocol">Service protocol</label><select id="tunnel-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div><div><label for="tunnel-port">Service port</label><input id="tunnel-port" type="number" min="1" max="65535" value="80"></div></div><small>The tunnel makes this service reachable from the Internet. Use the service’s login or a Cloudflare Access policy. HTTPS for *.house.chancecox.com needs matching Cloudflare certificate coverage.</small></fieldset>
+<fieldset><legend><label class="toggle"><input id="tunnel-enabled" type="checkbox">Cloudflare Tunnel</label></legend><p>Publish this web service through a Cloudflare tunnel.</p><label for="tunnel-host">Hostname</label><input id="tunnel-host" placeholder="nas-web or app.example.com" autocomplete="off"><div class="split"><div><label for="tunnel-protocol">Service protocol</label><select id="tunnel-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div><div><label for="tunnel-port">Service port</label><input id="tunnel-port" type="number" min="1" max="65535" value="80"></div></div><small id="tunnel-host-hint">Short labels use the base domain from Settings. Full names can use any Cloudflare domain this token can edit. Matching certificate coverage is required for HTTPS.</small></fieldset>
 <p class="hint">Both modes can be enabled using different hostnames. Turning a mode off removes its HomeScan-managed DNS record and tunnel route.</p><p id="form-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" data-close="device-dialog">Cancel</button><button id="save-button" class="primary" type="submit">Save settings</button></div></form></dialog>
 <dialog id="connection-dialog">
-<div class="dialog-head"><h2>Connect Cloudflare</h2><button class="close" data-close="connection-dialog" aria-label="Close Cloudflare setup">×</button></div>
+<form id="connection-form">
+<div class="dialog-head"><h2>Connect Cloudflare</h2><button type="button" class="close" data-close="connection-dialog" aria-label="Close Cloudflare setup">×</button></div>
 <p id="connection-status"></p>
 <h3>1. Sign in and create your token</h3>
 <p><a class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in &amp; create token ↗</a></p>
 <p>Opens Cloudflare in a new tab. Sign in, then choose <strong>Create Token → Create Custom Token</strong>. Name it <strong>HomeScan</strong> and add these permissions:</p>
 <ul class="setup-permissions"><li><strong>Zone → Zone → Read</strong></li><li><strong>Zone → DNS → Edit</strong></li><li><strong>Account → Cloudflare Tunnel → Edit</strong> for tunnels</li></ul>
-<p>Limit Zone Resources to <strong>chancecox.com</strong> and Account Resources to the account that owns it. Select <strong>Continue to summary → Create Token</strong>, then copy the token.</p>
-<h3>2. Connect HomeScan</h3>
-<p>Run this command on the HomeScan PC and paste the token into its hidden prompt. It connects the account and starts a dedicated HomeScan tunnel.</p>
-<pre>powershell -NoProfile -ExecutionPolicy Bypass -File C:\homeScan\configure-cloudflare.ps1</pre>
-<p>Use <code>-LocalDnsOnly</code> with the command if you only want local DNS. Settings can be saved before connecting; they’ll be applied when credentials are ready.</p>
-<p>For tunnel URLs below house.chancecox.com, configure a certificate covering <strong>*.house.chancecox.com</strong>, for example with Advanced Certificate Manager / Total TLS.</p>
+<p>Limit Zone Resources to the domains you want HomeScan to manage (or include all zones in the account). Select <strong>Continue to summary → Create Token</strong>, then copy the token.</p>
+<h3>2. Save the token in HomeScan</h3>
+<label for="cf-token">API token</label>
+<input id="cf-token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste Cloudflare API token">
+<small id="cf-token-hint">The token is stored only on this HomeScan host and is never shown again.</small>
+<fieldset>
+<legend><label class="toggle"><input id="cf-tunnel" type="checkbox" checked>Create / refresh HomeScan tunnel</label></legend>
+<p>Creates the dedicated HomeScan tunnel when missing and refreshes the connector token. Uncheck for local DNS only.</p>
+</fieldset>
+<p id="connection-error" class="error" role="alert"></p>
+<p class="hint">After enabling the tunnel, keep the cloudflared container running with <code>docker compose --profile cloudflare up -d</code>. The PowerShell setup script still works as an alternative.</p>
+<p>For HTTPS tunnel hostnames deeper than one label under a zone apex, configure matching certificate coverage (for example Advanced Certificate Manager / Total TLS).</p>
 <p><a href="https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/" target="_blank" rel="noopener noreferrer">Cloudflare certificate coverage ↗</a></p>
-<div class="dialog-actions"><button data-close="connection-dialog">Done</button></div>
+<div class="dialog-actions"><button type="button" data-close="connection-dialog">Cancel</button><button id="connection-save" class="primary" type="submit">Save token</button></div>
+</form>
 </dialog>
 <dialog id="settings-dialog">
 <form id="settings-form">
 <div class="dialog-head"><div><small class="eyebrow">HOME SCAN</small><h2>Settings</h2></div><button type="button" class="close" data-close="settings-dialog" aria-label="Close settings">×</button></div>
-<p>Configure optional Deco mesh inventory. When Deco is unreachable or turned off, network scanning continues normally.</p>
+<p>Choose the default DNS base domain and optional Deco mesh inventory. When Deco is unreachable or turned off, network scanning continues normally.</p>
+<fieldset>
+<legend>DNS base domain</legend>
+<label for="dns-suffix">Base domain</label>
+<input id="dns-suffix" placeholder="house.chancecox.com" autocomplete="off" required>
+<small>Used for local DNS sync and as the default for short tunnel hostnames. Tunnel routes can still use any other Cloudflare domain this token can edit.</small>
+</fieldset>
 <fieldset>
 <legend><label class="toggle"><input id="deco-enabled" type="checkbox">Deco support</label></legend>
 <p>Import online clients from the TP-Link Deco owner account. Connection failures are skipped and never block LAN scanning.</p>
@@ -60,11 +74,11 @@
 <div class="dialog-head"><div><small class="eyebrow">CLOUDFLARE TUNNEL</small><h2>Edit tunnel</h2></div><button type="button" class="close" data-close="tunnel-dialog" aria-label="Close tunnel editor">×</button></div>
 <p id="tunnel-edit-id" class="mono"></p>
 <label for="tunnel-edit-name">Tunnel name</label><input id="tunnel-edit-name" maxlength="100" required autocomplete="off">
-<fieldset><legend>Ingress ports</legend><div id="tunnel-rule-ports"></div></fieldset>
+<fieldset><legend>Public hostnames</legend><p>Edit origin ports or delete individual hostnames. Add another hostname to the same computer with <strong>Add hostname</strong>.</p><div id="tunnel-rule-ports"></div><button id="tunnel-add-hostname" type="button">Add hostname</button></fieldset>
 <label for="tunnel-edit-config">Remote configuration (JSON)</label><textarea id="tunnel-edit-config" rows="16" spellcheck="false" required></textarea>
 <p class="hint">The last ingress rule must be a catch-all. HomeScan-managed device routes must be changed from the device inventory.</p>
 <fieldset><legend>Automatic origin IP</legend>
-<p>Link an ingress rule to a computer. HomeScan will follow its MAC address and replace the origin IP after every scan while preserving the service protocol and port.</p>
+<p>Link an ingress rule to a computer. HomeScan will follow its MAC address and replace the origin IP after every scan while preserving the service protocol and port. The same computer can own multiple hostnames.</p>
 <label for="tunnel-link-rule">Ingress rule</label><select id="tunnel-link-rule"></select>
 <label for="tunnel-link-device">Computer</label><select id="tunnel-link-device"></select>
 <button id="tunnel-link-save" type="button">Link computer</button>
@@ -76,10 +90,11 @@
 </dialog>
 <dialog id="create-route-dialog"><form id="create-route-form">
 <div class="dialog-head"><div><small class="eyebrow">PUBLIC HOSTNAME</small><h2>Create tunnel hostname</h2></div><button type="button" class="close" data-close="create-route-dialog" aria-label="Close create tunnel hostname">×</button></div>
-<p>Create a public hostname on an active tunnel and link its origin to a MAC-identified computer.</p>
+<p>Create a public hostname on an active tunnel and link its origin to a MAC-identified computer. Repeat this for as many hostnames as you need on the same computer.</p>
 <label for="create-route-tunnel">Tunnel</label><select id="create-route-tunnel" required></select>
 <label for="create-route-zone">Domain</label><select id="create-route-zone" required></select>
-<label for="create-route-host">Hostname</label><input id="create-route-host" placeholder="files" required autocomplete="off">
+<label for="create-route-host">Hostname</label><input id="create-route-host" placeholder="files or files.house" required autocomplete="off">
+<small>Relative to the selected domain, or enter a full hostname under that domain.</small>
 <label for="create-route-device">Computer</label><select id="create-route-device" required></select>
 <div class="split"><div><label for="create-route-protocol">Protocol</label><select id="create-route-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div><div><label for="create-route-port">Port</label><input id="create-route-port" type="number" min="1" max="65535" value="80" required></div></div>
 <p id="create-route-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" data-close="create-route-dialog">Cancel</button><button id="create-route-save" class="primary" type="submit">Create hostname</button></div>
