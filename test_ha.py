@@ -57,8 +57,10 @@ class EnsureHaDnsTests(unittest.TestCase):
     def test_creates_and_updates_ha_record(self):
         first = self.m.ensure_ha_dns('192.168.2.100')
         self.assertEqual(first['hostname'], 'homescan.house.example.com')
-        self.assertEqual(list(self.api.records.values())[0]['content'], '192.168.2.100')
-        self.assertEqual(list(self.api.records.values())[0]['comment'], 'homescan:ha')
+        record = list(self.api.records.values())[0]
+        self.assertEqual(record['content'], '192.168.2.100')
+        self.assertEqual(record['comment'], 'homescan:ha')
+        self.assertGreaterEqual(record['ttl'], 60)
         self.m.ensure_ha_dns('192.168.2.101')
         self.assertEqual(list(self.api.records.values())[0]['content'], '192.168.2.101')
 

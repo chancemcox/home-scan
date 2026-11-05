@@ -721,7 +721,8 @@ class Manager:
             foreign = [r for r in matches if r.get('comment') != 'homescan:ha']
             if foreign:
                 raise CloudflareError(name+' is owned by another DNS record. Remove it or choose another HA hostname.')
-            desired = dict(type='A',name=name,content=ip,proxied=False,ttl=30,comment='homescan:ha')
+            # Cloudflare rejects TTLs under 60 for DNS-only records (HTTP 400).
+            desired = dict(type='A',name=name,content=ip,proxied=False,ttl=60,comment='homescan:ha')
             if matches:
                 record = matches[0]
                 if any(record.get(k) != v for k, v in desired.items()):
