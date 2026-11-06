@@ -1,24 +1,17 @@
 import { Worker } from 'node:worker_threads';
 
-const sab = new SharedArrayBuffer(4);
-const flag = new Int32Array(sab);
+const MAX_BODY = 4 * 1024 * 1024;
+const sab = new SharedArrayBuffer(8 + MAX_BODY);
+const flag = new Int32Array(sab, 0, 1);
+const view = new DataView(sab);
 let nextId = 1;
-const pending = new Map();
 
-const worker = new Worker(new URL('./syncHttpWorker.js', import.meta.url));
+const worker = new Worker(new URL('./syncHttpWorker.js', import.meta.url), { workerData: { sab } });
 worker.unref();
-worker.on('message', (message) => {
-  const slot = pending.get(message.id);
-  if (!slot) return;
-  slot.message = message;
-  Atomics.store(flag, 0, message.id);
-  Atomics.notify(flag, 0);
-});
 
-/** Blocking HTTP JSON call so the scanner, HA loop, and request handler share one code path. */
+/** Blocking HTTP JSON call. The worker writes the result into shared memory so the main thread can wait without missing the reply. */
 export function requestJson({ method = 'GET', url, headers = {}, body = null, timeout = 30_000 }) {
   const id = nextId++;
-  pending.set(id, {});
   Atomics.store(flag, 0, 0);
   worker.postMessage({ id, method, url, headers, body, timeout });
   const deadline = Date.now() + timeout + 2_000;
@@ -26,14 +19,13 @@ export function requestJson({ method = 'GET', url, headers = {}, body = null, ti
     const wait = Math.max(1, deadline - Date.now());
     Atomics.wait(flag, 0, 0, wait);
     if (Date.now() > deadline && Atomics.load(flag, 0) !== id) {
-      pending.delete(id);
       const error = new Error('HTTP request timed out');
       error.status = 0;
       throw error;
     }
   }
-  const message = pending.get(id).message;
-  pending.delete(id);
+  const length = view.getUint32(4, true);
+  const message = JSON.parse(Buffer.from(new Uint8Array(sab, 8, length)).toString('utf8'));
   if (message.error) {
     const error = new Error(message.error);
     error.status = message.status || 0;

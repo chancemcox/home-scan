@@ -108,11 +108,13 @@ function applyDatabaseBackend(cfg = null) {
   if (!cfg) { try { cfg = cloudflare.config(); } catch { cfg = {}; } }
   const doUrl = (cfg.cluster_worker_url || process.env.CLUSTER_WORKER_URL || '').trim();
   const doSecret = (cfg.cluster_secret || process.env.CLUSTER_SECRET || '').trim();
-  if (doUrl && doSecret) { storage.useDo(doUrl, doSecret); storage.init(DB); return true; }
+  if (doUrl && doSecret) {
+    try { storage.useDo(doUrl, doSecret); storage.init(DB); return true; }
+    catch (exc) { applog.error('Durable Object SQL unavailable, using local SQLite', { source: 'storage', detail: String(exc.message || exc) }); storage.useSqlite(); }
+  }
   if (cfg.d1_database_id && cfg.api_token && cfg.account_id) {
-    storage.useD1(cfg.account_id, cfg.d1_database_id, cfg.api_token);
-    storage.init(DB);
-    return true;
+    try { storage.useD1(cfg.account_id, cfg.d1_database_id, cfg.api_token); storage.init(DB); return true; }
+    catch (exc) { applog.error('Cloudflare D1 unavailable, using local SQLite', { source: 'storage', detail: String(exc.message || exc) }); storage.useSqlite(); }
   }
   storage.useSqlite();
   storage.init(DB);
