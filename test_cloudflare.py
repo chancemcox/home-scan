@@ -264,6 +264,19 @@ class IntegrationTests(unittest.TestCase):
         with storage.connect(self.db) as db:
             row=db.execute("SELECT hostname FROM cf_routes WHERE kind='tunnel'").fetchone()
         self.assertEqual(row['hostname'],'app.cdn.example.com')
+    def test_scan_networks_accepts_several_private_subnets(self):
+        from cloudflare_sync import parse_scan_networks
+        self.assertEqual(
+            parse_scan_networks('192.168.2.0/24\n10.0.0.0/24, 192.168.2.0/24'),
+            ['192.168.2.0/24', '10.0.0.0/24'])
+        with self.assertRaises(ValueError):
+            parse_scan_networks('8.8.8.8/32')
+        with self.assertRaises(ValueError):
+            parse_scan_networks('not-a-subnet')
+        saved = self.m.save_scan_networks(dict(networks='192.168.1.0/24, 192.168.2.0/24'))
+        self.assertEqual(saved['networks'], ['192.168.1.0/24', '192.168.2.0/24'])
+        self.assertEqual(storage.get_settings(self.db)['scan_network'], '192.168.1.0/24,192.168.2.0/24')
+
     def test_runtime_env_settings_are_stored(self):
         os.environ['HA_HOSTNAME'] = 'homescan.house.example.com'
         os.environ['HA_PORT'] = '8080'

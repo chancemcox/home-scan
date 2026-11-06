@@ -12,7 +12,7 @@ HomeScan records devices on your LAN, keeps Cloudflare tunnel routes lined up wi
 
 ## Options
 
-- **Scan network**: private IPv4 subnet, at most 4096 addresses. Example: `192.168.1.0/24`.
+- **Scan network**: used only when this host has no reachable private subnet of its own. Otherwise HomeScan reads the host routes and scans each private subnet it can reach, skipping Docker and Home Assistant internal networks.
 - **Scan mode**: `nmap` scans from this host. `agent` waits for an external scanner and requires an ingest token of at least 32 characters.
 - **This node's LAN IP**: optional address used when this node claims the shared cluster hostname.
 - **Agent ingest token**: used only in agent mode.

@@ -2,7 +2,7 @@
 const BASE=(document.querySelector('meta[name="homescan-base"]')||{}).content||'';
 const url=path=>BASE+path;
 const $=id=>document.getElementById(id);
-let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},haState={enabled:false,role:'',scanning:true},selected=null,editingTunnel=null,editingTunnelDetail=null,tunnelInventory=[],zoneInventory=[];
+let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},haState={enabled:false,role:'',scanning:true},scanNetworks=[],selected=null,editingTunnel=null,editingTunnelDetail=null,tunnelInventory=[],zoneInventory=[];
 let sortKey='hostname',sortDir=1;
 let suffix='';
 let socket=null,reconnectTimer=0,pollTimer=0,haveData=false,live=false,backoff=2000,refreshing=false;
@@ -174,6 +174,7 @@ function updateDecoFields(){
  $('deco-host').required=on;
 }
 function openSettings(){
+ $('scan-networks').textContent=(scanNetworks||[]).join('\n')||'No reachable private subnet found yet.';
  $('dns-suffix').value=(cf.suffix||'');
  $('deco-enabled').checked=!!decoState.enabled;
  $('deco-host').value=decoState.host||'';
@@ -278,7 +279,7 @@ function inventoryNotice(j){
 function apply(j){
  if(!j||!Array.isArray(j.devices)||!j.cloudflare||!Array.isArray(j.cloudflare.routes))return;
  haveData=true;backoff=2000;
- data=j.devices;cf=j.cloudflare;decoState=j.deco||decoState;haState=j.ha||haState;
+ data=j.devices;cf=j.cloudflare;decoState=j.deco||decoState;haState=j.ha||haState;scanNetworks=Array.isArray(j.networks)?j.networks:scanNetworks;
  if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
  else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set base domain)'}
  $('total').textContent=data.length;$('online').textContent=data.filter(d=>d.online).length;$('route-count').textContent=cf.routes.filter(r=>r.enabled).length;

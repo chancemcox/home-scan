@@ -222,6 +222,19 @@ class AppServerTests(unittest.TestCase):
         code, body, _ = self.get('/api/devices', auth=False)
         self.assertEqual(code, 401)
 
+    def test_reachable_subnets_come_from_the_routing_table(self):
+        routes = '\n'.join([
+            'Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT',
+            'eth0 0002A8C0 00000000 0001 0 0 0 00FFFFFF 0 0 0',
+            'eth0 0001A8C0 0102A8C0 0003 0 0 100 00FFFFFF 0 0 0',
+            'docker0 000011AC 00000000 0001 0 0 0 0000FFFF 0 0 0',
+            'eth0 00000000 0102A8C0 0003 0 0 0 00000000 0 0 0',
+            'lo 0000007F 00000000 0001 0 0 0 000000FF 0 0 0',
+        ])
+        self.assertEqual(
+            self.app.discover_scan_networks(routes),
+            ['192.168.2.0/24', '192.168.1.0/24'])
+
     def test_devices_payload_hides_token(self):
         code, body, _ = self.get('/api/devices')
         self.assertEqual(code, 200)

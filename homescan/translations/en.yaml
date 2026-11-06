@@ -1,7 +1,7 @@
 configuration:
   scan_network:
-    name: Scan network
-    description: Private IPv4 subnet to scan with Nmap. At most 4096 addresses.
+    name: Fallback scan subnet
+    description: Used only when this host has no reachable private subnet. Otherwise HomeScan scans the private subnets it can reach.
   scan_mode:
     name: Scan mode
     description: nmap scans from this host. agent waits for an external scanner.

@@ -61,6 +61,31 @@ class API:
         return result.get('result')
 
 
+def parse_scan_networks(value, limit=16):
+    """Return canonical private IPv4 subnets from a comma, space, or line separated list."""
+    if isinstance(value, (list, tuple)):
+        text = '\n'.join(str(item) for item in value)
+    else:
+        text = str(value or '')
+    parts = [part.strip() for part in re.split(r'[\s,;]+', text) if part.strip()]
+    if not parts:
+        raise ValueError('Enter one or more private IPv4 subnets, such as 192.168.1.0/24.')
+    if len(parts) > limit:
+        raise ValueError('Use at most %d subnets.' % limit)
+    nets = []
+    for part in parts:
+        try:
+            net = ipaddress.IPv4Network(part, strict=False)
+        except ValueError:
+            raise ValueError(part + ' is not an IPv4 subnet.') from None
+        if not net.is_private or net.num_addresses > 4096:
+            raise ValueError(str(net) + ' must be a private subnet with at most 4096 addresses.')
+        canon = str(net)
+        if canon not in nets:
+            nets.append(canon)
+    return nets
+
+
 def normalize_runtime_setting(key, value):
     """Return a shared-settings value, or '' when the input should not be stored."""
     raw = str(value or '').strip()
@@ -81,12 +106,9 @@ def normalize_runtime_setting(key, value):
         return raw if raw in ('nmap', 'agent') else ''
     if key == 'scan_network':
         try:
-            net = ipaddress.IPv4Network(raw, strict=False)
+            return ','.join(parse_scan_networks(raw))
         except ValueError:
             return ''
-        if not net.is_private or net.num_addresses > 4096:
-            return ''
-        return str(net)
     return raw
 
 
@@ -329,6 +351,23 @@ class Manager:
             atomic_json(self.config_path, cfg)
             storage.set_settings(self.db_path, {'suffix': suffix})
         return dict(ok=True, suffix=suffix)
+
+    def save_scan_networks(self, body):
+        """Persist the subnets Nmap should scan. Shared with the other install settings."""
+        raw = body.get('networks') if isinstance(body, dict) else body
+        nets = parse_scan_networks(raw)
+        stored = ','.join(nets)
+        with self.lock:
+            try:
+                cfg = json.loads(self.config_path.read_text()) if self.config_path.exists() else {}
+            except (ValueError, OSError):
+                cfg = {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            cfg['scan_network'] = stored
+            atomic_json(self.config_path, cfg)
+            storage.set_settings(self.db_path, {'scan_network': stored})
+        return dict(ok=True, scan_network=stored, networks=nets)
 
     def public_state(self):
         try: cfg = self.config()

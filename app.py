@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 import storage
 from storage import device_states
-from cloudflare_sync import Manager, CloudflareError
+from cloudflare_sync import Manager, CloudflareError, parse_scan_networks
 import deco
 import auth
 import applog
@@ -34,11 +34,14 @@ def devices_payload():
                     result['ha'] = CLUSTER.public_state()
                     result['cloudflare'] = CLOUDFLARE.public_state()
                     result['deco'] = deco.public_state()
+                    result['networks'] = scan_network_list()
                     return json.dumps(result)
             except (TypeError, ValueError):
                 pass
     result = storage.inventory(DB)
-    result.update(mode=MODE,network=NETWORK if MODE=='nmap' else 'Home network',
+    nets = scan_network_list()
+    result.update(mode=MODE,network=', '.join(nets) if MODE=='nmap' else 'Home network',
+                  networks=nets,
                   cloudflare=CLOUDFLARE.public_state(),deco=deco.public_state(),
                   ha=CLUSTER.public_state())
     return json.dumps(result)
@@ -54,6 +57,52 @@ def build_cluster_state(cfg, node_id):
     if not url or not secret:
         return None
     return ClusterState(url, secret, node_id or uuid.uuid4().hex)
+
+_SKIPPED_INTERFACES = ('lo', 'docker', 'veth', 'br-', 'hassio', 'cni', 'flannel', 'virbr', 'zt', 'tailscale', 'podman', 'nerdctl')
+
+
+def _route_address(hex_ip):
+    raw = bytes.fromhex(hex_ip)
+    return ipaddress.IPv4Address(raw[::-1])
+
+
+def discover_scan_networks(route_text=None):
+    """Private IPv4 subnets this host can reach, skipping virtual and oversized networks."""
+    if route_text is None:
+        try:
+            route_text = Path('/proc/net/route').read_text(encoding='utf-8')
+        except OSError:
+            return []
+    found = []
+    for line in route_text.splitlines()[1:]:
+        cols = line.split()
+        if len(cols) < 8 or cols[1] == '00000000':
+            continue
+        iface = cols[0].lower()
+        if iface.startswith(_SKIPPED_INTERFACES):
+            continue
+        try:
+            net = ipaddress.IPv4Network(f'{_route_address(cols[1])}/{_route_address(cols[7])}', strict=False)
+        except (ValueError, TypeError):
+            continue
+        if (not net.is_private or net.is_loopback or net.is_link_local
+                or net.num_addresses > 4096 or net.prefixlen < 20):
+            continue
+        canon = str(net)
+        if canon not in found:
+            found.append(canon)
+    return found
+
+
+def scan_network_list():
+    found = discover_scan_networks()
+    if found:
+        return found
+    try:
+        return parse_scan_networks(NETWORK)
+    except ValueError:
+        return []
+
 
 def apply_shared_runtime(cfg):
     """Apply install settings stored in the shared Cloudflare database."""
@@ -118,27 +167,36 @@ def record(hosts, started=None, error=None, source='network'):
     CLOUDFLARE.wake.set()
     publish()
 
+def nmap_subnet(net):
+    result = subprocess.run(['nmap','-sn','-R','--host-timeout','8s','-oX','-',str(net)],capture_output=True,text=True,timeout=50,check=True)
+    hosts = []
+    for h in ET.fromstring(result.stdout).findall('host'):
+        if h.find('status').get('state') != 'up': continue
+        addresses = {a.get('addrtype'):a.get('addr') for a in h.findall('address')}
+        if 'ipv4' not in addresses: continue
+        name = h.find('hostnames/hostname')
+        hosts.append(dict(ip=addresses['ipv4'],mac=addresses.get('mac',''),hostname=name.get('name','') if name is not None else ''))
+    return hosts
+
+
 def scanner():
-    net = ipaddress.IPv4Network(NETWORK,strict=False)
     while True:
         tick = time.monotonic()
         if not CLUSTER.is_leader():
             time.sleep(max(1, INTERVAL/2))
             continue
         started = now()
-        try:
-            result = subprocess.run(['nmap','-sn','-R','--host-timeout','8s','-oX','-',str(net)],capture_output=True,text=True,timeout=50,check=True)
-            hosts = []
-            for h in ET.fromstring(result.stdout).findall('host'):
-                if h.find('status').get('state') != 'up': continue
-                addresses = {a.get('addrtype'):a.get('addr') for a in h.findall('address')}
-                if 'ipv4' not in addresses: continue
-                name = h.find('hostnames/hostname')
-                hosts.append(dict(ip=addresses['ipv4'],mac=addresses.get('mac',''),hostname=name.get('name','') if name is not None else ''))
-            record(hosts,started)
-        except Exception as exc:
-            applog.exception('nmap scan failed', source='scanner', exc=exc)
-            record([],started,str(exc)[:1000])
+        hosts, errors = [], []
+        for net in scan_network_list():
+            try:
+                hosts.extend(nmap_subnet(net))
+            except Exception as exc:
+                applog.exception('nmap scan failed for '+str(net), source='scanner', exc=exc)
+                errors.append(str(net)+': '+str(exc))
+        if hosts or not errors:
+            record(hosts, started)
+        else:
+            record([], started, '; '.join(errors)[:1000])
         time.sleep(max(0,INTERVAL-(time.monotonic()-tick)))
 
 class Handler(BaseHTTPRequestHandler):
@@ -298,7 +356,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path=='/api/logout':
             auth.logout(self.session_token())
             return self.send(200, b'{"ok":true}', headers={'Set-Cookie': auth.clear_cookie_header()})
-        if self.path in ('/api/cloudflare/settings','/api/cloudflare/domain','/api/cloudflare/sync','/api/cloudflare/connect','/api/cloudflare/tunnels/update','/api/cloudflare/tunnels/link','/api/cloudflare/tunnels/create-route','/api/cloudflare/tunnels/delete','/api/cloudflare/tunnels/delete-hostname','/api/deco/settings'):
+        if self.path in ('/api/cloudflare/settings','/api/cloudflare/domain','/api/cloudflare/sync','/api/cloudflare/connect','/api/cloudflare/tunnels/update','/api/cloudflare/tunnels/link','/api/cloudflare/tunnels/create-route','/api/cloudflare/tunnels/delete','/api/cloudflare/tunnels/delete-hostname','/api/deco/settings','/api/scan/networks'):
             if not self.same_origin(): return self.send(403,b'{"error":"Use the HomeScan dashboard to change settings."}')
             if not self.current_user(): return self.send(401,b'{"error":"Sign in required."}')
             try:
@@ -309,6 +367,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(200,json.dumps(dict(ok=True,**state)).encode())
                 if self.path=='/api/cloudflare/domain':
                     result = CLOUDFLARE.save_domain(body)
+                    publish()
+                    return self.send(200,json.dumps(result).encode())
+                if self.path=='/api/scan/networks':
+                    result = CLOUDFLARE.save_scan_networks(body)
+                    apply_shared_runtime(CLOUDFLARE.config())
                     publish()
                     return self.send(200,json.dumps(result).encode())
                 if self.path=='/api/cloudflare/connect':
@@ -410,8 +473,7 @@ if __name__=='__main__':
     if MODE not in ('nmap','agent'): raise ValueError('Invalid SCAN_MODE')
     if MODE=='agent' and len(TOKEN)<32: raise ValueError('Set INGEST_TOKEN to at least 32 characters')
     if MODE=='nmap':
-        net=ipaddress.IPv4Network(NETWORK,strict=False)
-        if not net.is_private or net.num_addresses>4096: raise ValueError('Use a private subnet with at most 4096 addresses')
+        parse_scan_networks(NETWORK)
     try:
         init()
         threading.Thread(target=CLOUDFLARE.run,daemon=True).start()
