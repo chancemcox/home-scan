@@ -229,7 +229,6 @@ function openConnection(){
  $('cf-token').required=!cf.configured;
  $('cf-token-hint').textContent=cf.configured?'A token is already saved. Paste a new one only when rotating credentials.':'The token is stored only on this HomeScan host and is never shown again.';
  $('cf-tunnel').checked=cf.configured?!!cf.tunnel_configured:true;
- $('cf-d1').checked=cf.configured?!!(cf.d1_database_id||cf.database?.shared):true;
  $('connection-error').textContent='';
  $('connection-dialog').showModal();
 }
@@ -237,12 +236,12 @@ $('connection-button').addEventListener('click',openConnection);
 $('connection-form').addEventListener('submit',async event=>{
  event.preventDefault();$('connection-save').disabled=true;$('connection-error').textContent='';
  try{
-  const body={tunnel:$('cf-tunnel').checked,d1:$('cf-d1').checked};
+  const body={tunnel:$('cf-tunnel').checked};
   const token=$('cf-token').value.trim();
   if(token)body.api_token=token;
   const result=await post('/api/cloudflare/connect',body);
   cf.configured=!!result.configured;cf.zone=result.zone||cf.zone;cf.tunnel_configured=!!result.tunnel_configured;
-  cf.d1_database_id=result.d1_database_id||cf.d1_database_id;cf.database=result.database||cf.database||{shared:!!result.database_shared};
+  cf.database=result.database||cf.database||{shared:!!result.database_shared};
   applyStatus();$('connection-dialog').close();await refresh();await loadTunnels();
  }catch(e){$('connection-error').textContent=e.message}
  finally{$('connection-save').disabled=false}
@@ -261,7 +260,7 @@ $('filter-status').addEventListener('change',render);
 $('filter-cloudflare').addEventListener('change',render);
 for(const button of document.querySelectorAll('button.sort'))button.addEventListener('click',()=>{if(sortKey===button.dataset.sort)sortDir*=-1;else{sortKey=button.dataset.sort;sortDir=1}render()});
 function applyStatus(){
- const dbLabel=cf.database?.kind==='durable-object'?' · shared DO memory':(cf.database?.kind==='d1'||cf.d1_database_id?' · shared D1':'');
+ const dbLabel=cf.database?.kind==='durable-object'?' · shared DO memory':'';
  $('cloud-state').textContent=cf.configured?'Cloudflare connected · '+cf.zone+dbLabel:'Cloudflare not connected · Configure devices, then connect your account';
  $('sync-button').disabled=!cf.configured;
  if(!decoState.configured)$('deco-state').textContent='Deco: not configured';

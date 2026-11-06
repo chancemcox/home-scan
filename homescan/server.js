@@ -112,10 +112,6 @@ function applyDatabaseBackend(cfg = null) {
     try { storage.useDo(doUrl, doSecret); storage.init(DB); return true; }
     catch (exc) { applog.error('Durable Object SQL unavailable, using local SQLite', { source: 'storage', detail: String(exc.message || exc) }); storage.useSqlite(); }
   }
-  if (cfg.d1_database_id && cfg.api_token && cfg.account_id) {
-    try { storage.useD1(cfg.account_id, cfg.d1_database_id, cfg.api_token); storage.init(DB); return true; }
-    catch (exc) { applog.error('Cloudflare D1 unavailable, using local SQLite', { source: 'storage', detail: String(exc.message || exc) }); storage.useSqlite(); }
-  }
   storage.useSqlite();
   storage.init(DB);
   return false;

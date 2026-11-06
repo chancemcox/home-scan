@@ -27,7 +27,7 @@
 <h3>1. Sign in and create your token</h3>
 <p><a class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in &amp; create token ↗</a></p>
 <p>Opens Cloudflare in a new tab. Sign in, then choose <strong>Create Token → Create Custom Token</strong>. Name it <strong>HomeScan</strong> and add these permissions:</p>
-<ul class="setup-permissions"><li><strong>Zone → Zone → Read</strong></li><li><strong>Zone → DNS → Edit</strong></li><li><strong>Account → Cloudflare Tunnel → Edit</strong> for tunnels</li><li><strong>Account → D1 → Edit</strong> for the shared HA database</li></ul>
+<ul class="setup-permissions"><li><strong>Zone → Zone → Read</strong></li><li><strong>Zone → DNS → Edit</strong></li><li><strong>Account → Cloudflare Tunnel → Edit</strong> for tunnels</li></ul>
 <p>Limit Zone Resources to the domains you want HomeScan to manage (or include all zones in the account). Select <strong>Continue to summary → Create Token</strong>, then copy the token.</p>
 <h3>2. Save the token in HomeScan</h3>
 <label for="cf-token">API token</label>
@@ -36,10 +36,6 @@
 <fieldset>
 <legend><label class="toggle"><input id="cf-tunnel" type="checkbox" checked>Create / refresh HomeScan tunnel</label></legend>
 <p>Creates the dedicated HomeScan tunnel when missing and refreshes the connector token. Uncheck for local DNS only.</p>
-</fieldset>
-<fieldset>
-<legend><label class="toggle"><input id="cf-d1" type="checkbox" checked>Shared Cloudflare D1 database</label></legend>
-<p>Stores inventory and Cloudflare route state in a shared <strong>homescan</strong> D1 database so every HA node sees the same data. Leave enabled for active/standby clusters.</p>
 </fieldset>
 <p id="connection-error" class="error" role="alert"></p>
 <p class="hint">After enabling the tunnel, keep the cloudflared container running with <code>docker compose --profile cloudflare up -d</code>. The PowerShell setup script still works as an alternative.</p>

@@ -1,13 +1,13 @@
 param([switch]$LocalDnsOnly, [string]$Suffix = '')
 $ErrorActionPreference = 'Stop'
 Write-Host 'Cloudflare setup for HomeScan'
-Write-Host 'Token permissions: Zone Read, DNS Edit; Cloudflare Tunnel Edit for tunnels; D1 Edit for shared DB.'
+Write-Host 'Token permissions: Zone Read, DNS Edit, and Cloudflare Tunnel Edit for tunnels.'
 $secure = Read-Host 'Cloudflare API token (hidden)' -AsSecureString
 $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
 try {
     $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
     if (!$plain) { throw 'Token cannot be empty.' }
-    $body = @{api_token=$plain;tunnel=(!$LocalDnsOnly);d1=$true}
+    $body = @{api_token=$plain;tunnel=(!$LocalDnsOnly)}
     if ($Suffix) { $body.suffix = $Suffix }
     $payload = $body | ConvertTo-Json -Compress
     $raw = $payload | & docker compose --project-directory $PSScriptRoot exec -T homescan node lib/cloudflare.js setup
