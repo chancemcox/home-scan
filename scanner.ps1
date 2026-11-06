@@ -54,7 +54,7 @@ while ($true) {
         # Deco is optional. Timeouts, auth failures, and disabled support must not
         # prevent the network scan from being recorded.
         try {
-            $raw = & docker compose --project-directory $PSScriptRoot exec -T homescan python deco.py 2>$null
+            $raw = & docker compose --project-directory $PSScriptRoot exec -T homescan node lib/deco.js 2>$null
             if ($LASTEXITCODE -ne 0) { throw 'Deco helper unavailable' }
             $deco = ($raw -join "`n") | ConvertFrom-Json
             if ($deco.enabled -and $deco.available) {

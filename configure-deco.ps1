@@ -15,12 +15,12 @@ if (!$Disabled) {
     }
 }
 $payload = @{enabled=(-not $Disabled);host=$HostAddress;username='admin';password=$password} | ConvertTo-Json -Compress
-$raw = $payload | & docker compose --project-directory $PSScriptRoot exec -T homescan python -c "import json,sys,deco; print(json.dumps(deco.save_settings(json.load(sys.stdin))))"
+$raw = $payload | & docker compose --project-directory $PSScriptRoot exec -T homescan node lib/deco.js save
 if ($LASTEXITCODE -ne 0) { throw (($raw -join "`n")) }
 $result = ($raw -join "`n") | ConvertFrom-Json
 Write-Host ($(if ($result.enabled) { "Deco enabled for $($result.host)." } else { 'Deco support turned off.' }))
 if ($result.enabled) {
-    & docker compose --project-directory $PSScriptRoot exec -T homescan python deco.py | Out-Host
+    & docker compose --project-directory $PSScriptRoot exec -T homescan node lib/deco.js | Out-Host
     Write-Host 'The next one-minute scan will import clients if the connection test succeeded.'
 }
 $password = $null; $payload = $null

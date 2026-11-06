@@ -1,12 +1,12 @@
-FROM python:3.14-slim
+FROM node:24-bookworm-slim
 ARG HOMESCAN_PUSH=unknown
 RUN apt-get update && apt-get install -y --no-install-recommends nmap && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-RUN pip install --no-cache-dir tplink-deco-api==2.1.0
-COPY app.py storage.py cloudflare_sync.py ws.py ha.py auth.py d1.py do_db.py cluster_state.py applog.py index.html login.html login.js app.js style.css deco.py ./
+COPY package.json server.js index.html login.html login.js app.js style.css ./
+COPY lib ./lib
 RUN printf '%s\n' "$HOMESCAN_PUSH" > /app/PUSH
-ENV PYTHONUNBUFFERED=1 DB_PATH=/data/homescan.db HOMESCAN_PUSH=$HOMESCAN_PUSH
+ENV DB_PATH=/data/homescan.db HOMESCAN_PUSH=$HOMESCAN_PUSH
 VOLUME /data
 EXPOSE 80
-HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1/health', timeout=2)"
-CMD ["python", "app.py"]
+HEALTHCHECK --interval=30s --timeout=3s CMD node -e "fetch('http://127.0.0.1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "server.js"]

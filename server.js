@@ -1,0 +1,537 @@
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as applog from './lib/applog.js';
+import * as auth from './lib/auth.js';
+import { CloudflareError, Manager, parseScanNetworks } from './lib/cloudflare.js';
+import { Cluster } from './lib/ha.js';
+import { ClusterState } from './lib/clusterState.js';
+import * as deco from './lib/deco.js';
+import * as storage from './lib/storage.js';
+import { Hub, handshakeHeaders } from './lib/ws.js';
+
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const DB = process.env.DB_PATH || '/data/homescan.db';
+let MODE = process.env.SCAN_MODE || 'nmap';
+let TOKEN = process.env.INGEST_TOKEN || '';
+let NETWORK = process.env.SCAN_NETWORK || '192.168.1.0/24';
+const INTERVAL = 60;
+const SKIPPED = ['lo', 'docker', 'veth', 'br-', 'hassio', 'cni', 'flannel', 'virbr', 'zt', 'tailscale', 'podman', 'nerdctl'];
+
+const dashboard = new Hub();
+let cloudflare = new Manager(DB);
+let cluster = new Cluster(cloudflare, { onChange: () => publish() });
+
+function routeAddress(hexIp) {
+  const raw = Buffer.from(hexIp, 'hex');
+  return [...raw].reverse().join('.');
+}
+
+function prefixLength(mask) {
+  if (!mask.includes('.')) return Number(mask);
+  const parts = mask.split('.').map(Number);
+  let bits = 0;
+  let rest = (((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0);
+  while (rest & 0x80000000) { bits += 1; rest = (rest << 1) >>> 0; }
+  return bits;
+}
+
+function parseNetwork(cidr) {
+  const [addr, prefixRaw] = cidr.split('/');
+  const prefix = Number(prefixRaw);
+  const parts = addr.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => part > 255) || !Number.isInteger(prefix)) return null;
+  let n = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  n = (n & mask) >>> 0;
+  const first = n >>> 24;
+  const second = (n >>> 16) & 255;
+  return {
+    cidr: [first, second, (n >>> 8) & 255, n & 255].join('.') + '/' + prefix,
+    size: 2 ** (32 - prefix),
+    prefix,
+    private: first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168),
+    loopback: first === 127,
+    linkLocal: first === 169 && second === 254,
+  };
+}
+
+export function discoverScanNetworks(routeText = null) {
+  if (routeText == null) {
+    try { routeText = fs.readFileSync('/proc/net/route', 'utf8'); }
+    catch { return []; }
+  }
+  const found = [];
+  for (const line of routeText.split(/\r?\n/).slice(1)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 8 || cols[1] === '00000000') continue;
+    const iface = cols[0].toLowerCase();
+    if (SKIPPED.some((prefix) => iface.startsWith(prefix))) continue;
+    let net;
+    try { net = parseNetwork(`${routeAddress(cols[1])}/${prefixLength(routeAddress(cols[7]))}`); }
+    catch { continue; }
+    if (!net || !net.private || net.loopback || net.linkLocal || net.size > 4096 || net.prefix < 20) continue;
+    if (!found.includes(net.cidr)) found.push(net.cidr);
+  }
+  return found;
+}
+
+export function scanNetworkList() {
+  const found = discoverScanNetworks();
+  if (found.length) return found;
+  try { return parseScanNetworks(NETWORK); }
+  catch { return []; }
+}
+
+function applySharedRuntime(cfg) {
+  if (['nmap', 'agent'].includes(cfg.scan_mode)) {
+    MODE = cfg.scan_mode;
+    process.env.SCAN_MODE = MODE;
+  }
+  if (cfg.scan_network) {
+    NETWORK = String(cfg.scan_network).trim();
+    process.env.SCAN_NETWORK = NETWORK;
+  }
+}
+
+function buildClusterState(cfg, nodeId) {
+  const url = (cfg.cluster_worker_url || process.env.CLUSTER_WORKER_URL || '').trim();
+  const secret = (cfg.cluster_secret || process.env.CLUSTER_SECRET || '').trim();
+  if (!url || !secret) return null;
+  return new ClusterState(url, secret, nodeId || crypto.randomBytes(16).toString('hex'));
+}
+
+function applyDatabaseBackend(cfg = null) {
+  if (!cfg) { try { cfg = cloudflare.config(); } catch { cfg = {}; } }
+  const doUrl = (cfg.cluster_worker_url || process.env.CLUSTER_WORKER_URL || '').trim();
+  const doSecret = (cfg.cluster_secret || process.env.CLUSTER_SECRET || '').trim();
+  if (doUrl && doSecret) { storage.useDo(doUrl, doSecret); storage.init(DB); return true; }
+  if (cfg.d1_database_id && cfg.api_token && cfg.account_id) {
+    storage.useD1(cfg.account_id, cfg.d1_database_id, cfg.api_token);
+    storage.init(DB);
+    return true;
+  }
+  storage.useSqlite();
+  storage.init(DB);
+  return false;
+}
+
+function devicesPayload() {
+  if (!cluster.isLeader()) {
+    const shared = cluster.sharedInventory();
+    if (shared) {
+      try {
+        const result = JSON.parse(shared);
+        if (result && Array.isArray(result.devices)) {
+          result.ha = cluster.publicState();
+          result.cloudflare = cloudflare.publicState();
+          result.deco = deco.publicState();
+          result.networks = scanNetworkList();
+          return JSON.stringify(result);
+        }
+      } catch { /* fall through */ }
+    }
+  }
+  const result = storage.inventory(DB);
+  const nets = scanNetworkList();
+  Object.assign(result, {
+    mode: MODE,
+    network: MODE === 'nmap' ? nets.join(', ') : 'Home network',
+    networks: nets,
+    cloudflare: cloudflare.publicState(),
+    deco: deco.publicState(),
+    ha: cluster.publicState(),
+  });
+  return JSON.stringify(result);
+}
+
+function publish() {
+  const payload = devicesPayload();
+  dashboard.broadcast(payload);
+  cluster.publishInventory(payload);
+}
+
+export function init() {
+  auth.init();
+  applog.configure(DB);
+  cloudflare = new Manager(DB, undefined, undefined, () => publish());
+  let cfg = {};
+  try { cfg = cloudflare.config(); } catch { cfg = {}; }
+  applyDatabaseBackend(cfg);
+  cloudflare.init();
+  if (storage.backendState().shared) {
+    storage.migrateLocalToRemote(DB);
+    cloudflare.syncSharedSettings();
+  }
+  try { cfg = cloudflare.config(); } catch { cfg = cfg || {}; }
+  applySharedRuntime(cfg);
+  const nodeId = cfg.installation_id || null;
+  const clusterArgs = { nodeId, clusterState: buildClusterState(cfg, nodeId), onChange: () => publish() };
+  if (cfg.ha_hostname) clusterArgs.hostname = cfg.ha_hostname;
+  if (/^\d+$/.test(String(cfg.ha_port || ''))) clusterArgs.port = Number(cfg.ha_port);
+  if (cfg.ha_enabled != null && cfg.ha_enabled !== '') clusterArgs.enabled = !['0', 'false', 'no', 'off'].includes(String(cfg.ha_enabled).toLowerCase());
+  cluster = new Cluster(cloudflare, clusterArgs);
+  applog.info('HomeScan started', { source: 'app', detail: JSON.stringify({ push: applog.PUSH, mode: MODE, database: storage.backendState() }) });
+}
+
+function nmapSubnet(cidr) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('nmap', ['-sn', '-R', '--host-timeout', '8s', '-oX', '-', String(cidr)], { timeout: 50_000 });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) { reject(new Error(stderr || `nmap exited ${code}`)); return; }
+      const hosts = [];
+      for (const block of stdout.split('<host').slice(1)) {
+        if (!/state="up"/.test(block)) continue;
+        const addresses = {};
+        for (const match of block.matchAll(/<address([^>]*)>/g)) {
+          const addr = /addr="([^"]+)"/.exec(match[1]);
+          const type = /addrtype="([^"]+)"/.exec(match[1]);
+          if (addr && type) addresses[type[1]] = addr[1];
+        }
+        if (!addresses.ipv4) continue;
+        const name = /<hostname[^>]*name="([^"]*)"/.exec(block);
+        hosts.push({ ip: addresses.ipv4, mac: addresses.mac || '', hostname: name ? name[1] : '' });
+      }
+      resolve(hosts);
+    });
+  });
+}
+
+async function scanner() {
+  while (true) {
+    const tick = Date.now();
+    if (!cluster.isLeader()) { await new Promise((resolve) => setTimeout(resolve, Math.max(1000, INTERVAL * 500))); continue; }
+    const started = storage.now();
+    const hosts = [];
+    const errors = [];
+    for (const net of scanNetworkList()) {
+      try { hosts.push(...await nmapSubnet(net)); }
+      catch (exc) {
+        applog.exception('nmap scan failed for ' + net, { source: 'scanner', exc });
+        errors.push(`${net}: ${exc.message || exc}`);
+      }
+    }
+    try {
+      storage.recordBatches(DB, [{ source: 'network', hosts, started, error: hosts.length || !errors.length ? null : errors.join('; ').slice(0, 1000) }]);
+      cloudflare.wake.set();
+      publish();
+    } catch (exc) { applog.exception('scan record failed', { source: 'scanner', exc }); }
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, INTERVAL * 1000 - (Date.now() - tick))));
+  }
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const size = Number(req.headers['content-length'] || 0);
+    if (!(size > 0 && size <= 1048576)) { reject(Object.assign(new Error('Invalid request size'), { user: true })); return; }
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Expected a JSON object');
+        resolve(body);
+      } catch (exc) { reject(Object.assign(exc instanceof Error ? exc : new Error('Expected a JSON object'), { user: true })); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function ingressBase(req) {
+  if (process.env.HASS_INGRESS !== '1') return '';
+  const base = String(req.headers['x-ingress-path'] || '').trim().replace(/\/$/, '');
+  if (!base.startsWith('/') || base.startsWith('//') || /["'<>&\n\r ]/.test(base)) return '';
+  return base;
+}
+
+function ingressUser(req) {
+  const base = ingressBase(req);
+  if (!base) return null;
+  const peer = req.socket.remoteAddress || '';
+  const normalized = peer.replace(/^::ffff:/, '');
+  const allowed = new Set(['172.30.32.2']);
+  if (process.env.HASS_INGRESS_TRUST_LOOPBACK === '1') allowed.add('127.0.0.1');
+  if (!allowed.has(normalized)) {
+    applog.warning('ingress request ignored', { source: 'auth', detail: `peer ${normalized}` });
+    return null;
+  }
+  return String(req.headers['x-remote-user-name'] || req.headers['x-remote-user-display-name'] || req.headers['x-remote-user-id'] || 'homeassistant').slice(0, 80);
+}
+
+function currentUser(req) {
+  return ingressUser(req) || auth.sessionUser(auth.parseCookie(req.headers.cookie || ''));
+}
+
+function sameOrigin(req) {
+  if (ingressUser(req)) return true;
+  const origin = req.headers.origin || '';
+  let parsed;
+  try { parsed = new URL(origin); } catch { return false; }
+  const site = req.headers['sec-fetch-site'] || 'same-origin';
+  return ['http:', 'https:'].includes(parsed.protocol)
+    && parsed.host === (req.headers.host || '')
+    && !['cross-site', 'same-site'].includes(site)
+    && String(req.headers['content-type'] || '').split(';')[0] === 'application/json';
+}
+
+function send(req, res, code, body, contentType = 'application/json; charset=utf-8', headers = {}) {
+  const data = Buffer.isBuffer(body) ? body : Buffer.from(body);
+  const framed = ingressBase(req) ? 'frame-ancestors *' : "frame-ancestors 'none'";
+  const extra = { ...headers };
+  if (!ingressBase(req)) extra['X-Frame-Options'] = 'DENY';
+  res.writeHead(code, {
+    'Content-Type': contentType,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': `default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; ${framed}; base-uri 'none'`,
+    'Content-Length': data.length,
+    ...extra,
+  });
+  res.end(data);
+}
+
+function page(req, res, name, contentType) {
+  let text = fs.readFileSync(path.join(ROOT, name), 'utf8');
+  const base = ingressBase(req);
+  if (base && name.endsWith('.html')) {
+    text = text.replace('<head>', `<head><meta name="homescan-base" content="${base}">`, 1);
+    text = text.replaceAll('href="/', `href="${base}/`).replaceAll('src="/', `src="${base}/`);
+  }
+  send(req, res, 200, text, contentType);
+}
+
+function redirect(res, location) {
+  res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
+  res.end();
+}
+
+async function handlePost(req, res, pathname) {
+  if (pathname === '/api/login') {
+    try {
+      const body = await readBody(req);
+      const result = auth.login(body.username, body.password, Boolean(body.remember));
+      send(req, res, 200, JSON.stringify({ ok: true, username: result.username }), 'application/json; charset=utf-8', {
+        'Set-Cookie': auth.cookieHeader(result.token, result.remember, result.max_age),
+      });
+    } catch (exc) {
+      if (exc instanceof Error && exc.user !== false) {
+        applog.warning('login rejected', { source: 'auth', detail: exc.message });
+        send(req, res, 401, JSON.stringify({ error: exc.message }));
+      } else {
+        applog.exception('login failed', { source: 'auth', exc });
+        send(req, res, 500, '{"error":"Sign in failed."}');
+      }
+    }
+    return;
+  }
+  if (pathname === '/api/logout') {
+    auth.logout(auth.parseCookie(req.headers.cookie || ''));
+    send(req, res, 200, '{"ok":true}', 'application/json; charset=utf-8', { 'Set-Cookie': auth.clearCookieHeader() });
+    return;
+  }
+  const settings = ['/api/cloudflare/settings', '/api/cloudflare/domain', '/api/cloudflare/sync', '/api/cloudflare/connect', '/api/cloudflare/tunnels/update', '/api/cloudflare/tunnels/link', '/api/cloudflare/tunnels/create-route', '/api/cloudflare/tunnels/delete', '/api/cloudflare/tunnels/delete-hostname', '/api/deco/settings', '/api/scan/networks'];
+  if (settings.includes(pathname)) {
+    if (!sameOrigin(req)) { send(req, res, 403, '{"error":"Use the HomeScan dashboard to change settings."}'); return; }
+    if (!currentUser(req)) { send(req, res, 401, '{"error":"Sign in required."}'); return; }
+    try {
+      const body = await readBody(req);
+      if (pathname === '/api/deco/settings') {
+        const state = deco.saveSettings(body);
+        publish();
+        send(req, res, 200, JSON.stringify({ ok: true, ...state }));
+        return;
+      }
+      if (pathname === '/api/cloudflare/domain') { const result = cloudflare.saveDomain(body); publish(); send(req, res, 200, JSON.stringify(result)); return; }
+      if (pathname === '/api/scan/networks') { const result = cloudflare.saveScanNetworks(body); applySharedRuntime(cloudflare.config()); publish(); send(req, res, 200, JSON.stringify(result)); return; }
+      if (pathname === '/api/cloudflare/connect') {
+        const result = cloudflare.connect(body);
+        applyDatabaseBackend(cloudflare.config());
+        cloudflare.init();
+        if (storage.backendState().shared) { storage.migrateLocalToRemote(DB); cloudflare.syncSharedSettings(); }
+        publish();
+        send(req, res, 200, JSON.stringify({ ok: true, ...result }));
+        return;
+      }
+      const actions = {
+        '/api/cloudflare/tunnels/update': () => cloudflare.updateTunnel(body),
+        '/api/cloudflare/tunnels/link': () => cloudflare.saveTunnelLink(body),
+        '/api/cloudflare/tunnels/create-route': () => cloudflare.createTunnelRoute(body),
+        '/api/cloudflare/tunnels/delete-hostname': () => cloudflare.deleteTunnelHostname(body),
+        '/api/cloudflare/tunnels/delete': () => cloudflare.deleteTunnel(body),
+      };
+      if (actions[pathname]) { const result = actions[pathname](); publish(); send(req, res, 200, JSON.stringify(result)); return; }
+      if (pathname.endsWith('/settings')) cloudflare.save(body);
+      else cloudflare.wake.set();
+      publish();
+      send(req, res, 200, '{"ok":true}');
+    } catch (exc) {
+      if (exc instanceof CloudflareError) {
+        applog.error('settings Cloudflare error', { source: 'api', detail: `${pathname}: ${exc.message}` });
+        send(req, res, 502, JSON.stringify({ error: exc.message }));
+      } else if (exc instanceof Error) {
+        applog.warning('settings request rejected', { source: 'api', detail: `${pathname}: ${exc.message}` });
+        send(req, res, 400, JSON.stringify({ error: exc.message }));
+      } else {
+        applog.exception('settings request failed', { source: 'api', exc });
+        send(req, res, 500, '{"error":"Request failed."}');
+      }
+    }
+    return;
+  }
+  if (pathname !== '/api/scan' || MODE !== 'agent') { send(req, res, 404, '{}'); return; }
+  const header = req.headers.authorization || '';
+  const expected = Buffer.from('Bearer ' + TOKEN);
+  const actual = Buffer.from(header);
+  if (!TOKEN || TOKEN.length < 32 || expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+    send(req, res, 401, '{"error":"Unauthorized"}');
+    return;
+  }
+  if (!cluster.isLeader()) {
+    send(req, res, 503, JSON.stringify({ error: `This HomeScan node is on standby. Point the scanner at ${cluster.hostname}:${cluster.port}.`, ha: cluster.publicState() }));
+    return;
+  }
+  try {
+    const body = await readBody(req);
+    let batches = body.sources;
+    if (batches == null) batches = [{ source: 'network', hosts: body.hosts, error: body.error }];
+    if (!Array.isArray(batches) || batches.length < 1 || batches.length > 8) throw new Error('Invalid sources');
+    const cleaned = [];
+    for (const batch of batches) {
+      if (!batch || typeof batch !== 'object') throw new Error('Invalid sources');
+      if (batch.source === 'deco' && batch.error && !(batch.hosts || []).length) continue;
+      cleaned.push(batch);
+    }
+    if (!cleaned.length) throw new Error('Invalid sources');
+    storage.recordBatches(DB, cleaned);
+    cloudflare.wake.set();
+    publish();
+    send(req, res, 200, '{"ok":true}');
+  } catch (exc) {
+    applog.warning('scan ingest rejected', { source: 'api', detail: exc.message || String(exc) });
+    send(req, res, 400, JSON.stringify({ error: exc.message || 'Invalid hosts' }));
+  }
+}
+
+function handleGet(req, res, pathname, query) {
+  const user = currentUser(req);
+  const base = ingressBase(req);
+  if (pathname === '/login') {
+    if (user) { redirect(res, base + '/'); return; }
+    page(req, res, 'login.html', 'text/html; charset=utf-8');
+    return;
+  }
+  if (pathname === '/style.css' || pathname === '/login.js') {
+    const name = pathname.endsWith('.css') ? 'style.css' : 'login.js';
+    page(req, res, name, name.endsWith('.css') ? 'text/css; charset=utf-8' : 'application/javascript; charset=utf-8');
+    return;
+  }
+  if (pathname === '/' || pathname === '/app.js' || pathname === '/index.html') {
+    if (!user) {
+      const accept = req.headers.accept || '';
+      if (accept.includes('text/html') || pathname === '/' || pathname === '/index.html') { redirect(res, base + '/login'); return; }
+      send(req, res, 401, '{"error":"Sign in required."}');
+      return;
+    }
+    const name = pathname === '/app.js' ? 'app.js' : 'index.html';
+    page(req, res, name, name === 'index.html' ? 'text/html; charset=utf-8' : 'application/javascript; charset=utf-8');
+    return;
+  }
+  if (pathname === '/health') { send(req, res, 200, '{"ok":true}'); return; }
+  if (pathname === '/api/me') {
+    if (!user) { send(req, res, 401, '{"error":"Sign in required."}'); return; }
+    send(req, res, 200, JSON.stringify({ username: user }));
+    return;
+  }
+  if (!user && pathname.startsWith('/api/')) { send(req, res, 401, '{"error":"Sign in required."}'); return; }
+  if (pathname === '/api/ha') { send(req, res, 200, JSON.stringify(cluster.publicState())); return; }
+  if (pathname === '/api/cloudflare') { send(req, res, 200, JSON.stringify(cloudflare.publicState())); return; }
+  if (pathname === '/api/cloudflare/tunnels') { send(req, res, 200, JSON.stringify(cloudflare.listTunnels())); return; }
+  if (pathname === '/api/cloudflare/zones') { send(req, res, 200, JSON.stringify(cloudflare.listZones())); return; }
+  if (pathname === '/api/cloudflare/tunnel') {
+    try { send(req, res, 200, JSON.stringify(cloudflare.getTunnel(query.get('id') || ''))); }
+    catch (exc) {
+      if (exc instanceof CloudflareError) send(req, res, 502, JSON.stringify({ error: exc.message }));
+      else if (exc instanceof Error) send(req, res, 400, JSON.stringify({ error: exc.message }));
+      else send(req, res, 502, '{"error":"Cloudflare could not load this tunnel."}');
+    }
+    return;
+  }
+  if (pathname === '/api/deco') { send(req, res, 200, JSON.stringify(deco.publicState())); return; }
+  if (pathname === '/api/logs') {
+    const limit = Number(query.get('limit') || 100);
+    send(req, res, 200, JSON.stringify({ push: applog.PUSH, retention_days: applog.RETENTION_DAYS, logs: storage.recentLogs(DB, Number.isFinite(limit) ? limit : 100) }));
+    return;
+  }
+  if (pathname !== '/api/devices') { send(req, res, 404, '{}'); return; }
+  send(req, res, 200, devicesPayload());
+}
+
+function upgrade(req, socket, head) {
+  const url = new URL(req.url, 'http://localhost');
+  if (!['/ws', '/ha'].includes(url.pathname)) { socket.destroy(); return; }
+  if (url.pathname === '/ws' && !currentUser(req)) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\nContent-Length: 27\r\n\r\n{"error":"Sign in required."}');
+    socket.end();
+    return;
+  }
+  if (url.pathname === '/ha' && !cluster.isLeader()) {
+    const body = JSON.stringify({ error: 'This HomeScan node is not the cluster leader.', ha: cluster.publicState() });
+    socket.write(`HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    socket.end();
+    return;
+  }
+  const key = req.headers['sec-websocket-key'];
+  if (!key) { socket.destroy(); return; }
+  socket.write(handshakeHeaders(key));
+  const hub = url.pathname === '/ha' ? cluster.hub : dashboard;
+  const snapshot = url.pathname === '/ha'
+    ? () => JSON.stringify({ type: 'heartbeat', node_id: cluster.nodeId, ip: cluster.localIp || '', hostname: cluster.resolveHostname(), ts: Date.now() / 1000, generation: cluster._generation })
+    : () => devicesPayload();
+  hub.serve(socket, head, snapshot);
+}
+
+export function applyAddonOptions() {
+  const file = process.env.HASS_OPTIONS || '/data/options.json';
+  if (!fs.existsSync(file)) return;
+  let opts;
+  try { opts = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+  if (!opts || typeof opts !== 'object') return;
+  if (opts.scan_network) { NETWORK = String(opts.scan_network).trim(); process.env.SCAN_NETWORK = NETWORK; }
+  if (opts.ha_local_ip) process.env.HA_LOCAL_IP = String(opts.ha_local_ip).trim();
+  if (['nmap', 'agent'].includes(opts.scan_mode)) { MODE = opts.scan_mode; process.env.SCAN_MODE = MODE; }
+  if (opts.ingest_token) { TOKEN = String(opts.ingest_token).trim(); process.env.INGEST_TOKEN = TOKEN; }
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  applyAddonOptions();
+  if (!['nmap', 'agent'].includes(MODE)) throw new Error('Invalid SCAN_MODE');
+  if (MODE === 'agent' && TOKEN.length < 32) throw new Error('Set INGEST_TOKEN to at least 32 characters');
+  if (MODE === 'nmap') parseScanNetworks(NETWORK);
+  await storage.loadSqlite();
+  try {
+    init();
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url, 'http://localhost');
+      if (req.method === 'GET') handleGet(req, res, url.pathname, url.searchParams);
+      else if (req.method === 'POST') handlePost(req, res, url.pathname);
+      else send(req, res, 405, '{}');
+    });
+    server.on('upgrade', upgrade);
+    server.listen(Number(process.env.PORT || 80), '0.0.0.0');
+    cloudflare.run();
+    cluster.run();
+    if (MODE === 'nmap') scanner();
+  } catch (exc) {
+    applog.exception('HomeScan process crashed', { source: 'app', exc });
+    throw exc;
+  }
+}

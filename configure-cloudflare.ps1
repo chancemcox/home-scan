@@ -10,7 +10,7 @@ try {
     $body = @{api_token=$plain;tunnel=(!$LocalDnsOnly);d1=$true}
     if ($Suffix) { $body.suffix = $Suffix }
     $payload = $body | ConvertTo-Json -Compress
-    $raw = $payload | & docker compose --project-directory $PSScriptRoot exec -T homescan python cloudflare_sync.py setup
+    $raw = $payload | & docker compose --project-directory $PSScriptRoot exec -T homescan node lib/cloudflare.js setup
     if ($LASTEXITCODE -ne 0) { throw (($raw -join "`n") | ConvertFrom-Json).error }
     $result = ($raw -join "`n") | ConvertFrom-Json
     if ($result.error) { throw $result.error }
