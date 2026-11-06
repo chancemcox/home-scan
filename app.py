@@ -55,6 +55,17 @@ def build_cluster_state(cfg, node_id):
         return None
     return ClusterState(url, secret, node_id or uuid.uuid4().hex)
 
+def apply_shared_runtime(cfg):
+    """Apply install settings stored in the shared Cloudflare database."""
+    global MODE, NETWORK
+    if cfg.get('scan_mode') in ('nmap', 'agent'):
+        MODE = cfg['scan_mode']
+        os.environ['SCAN_MODE'] = MODE
+    if cfg.get('scan_network'):
+        NETWORK = str(cfg['scan_network']).strip()
+        os.environ['SCAN_NETWORK'] = NETWORK
+
+
 def apply_database_backend(cfg=None):
     """Prefer Durable Object SQL (in-memory tables), then D1, then local SQLite."""
     if cfg is None:
@@ -87,9 +98,18 @@ def init():
     if storage.backend_state().get('shared'):
         storage.migrate_local_to_remote(DB)
         CLOUDFLARE.sync_shared_settings()
+    try: cfg = CLOUDFLARE.config()
+    except (OSError, ValueError): cfg = cfg or {}
+    apply_shared_runtime(cfg)
     node_id = cfg.get('installation_id') or None
-    CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish(), node_id=node_id,
-                      cluster_state=build_cluster_state(cfg, node_id))
+    cluster_args = dict(node_id=node_id, cluster_state=build_cluster_state(cfg, node_id))
+    if cfg.get('ha_hostname'):
+        cluster_args['hostname'] = cfg['ha_hostname']
+    if str(cfg.get('ha_port') or '').isdigit():
+        cluster_args['port'] = int(cfg['ha_port'])
+    if cfg.get('ha_enabled') not in (None, ''):
+        cluster_args['enabled'] = str(cfg.get('ha_enabled')).lower() not in ('0', 'false', 'no', 'off')
+    CLUSTER = Cluster(CLOUDFLARE, on_change=lambda _state: publish(), **cluster_args)
     applog.info('HomeScan started', source='app',
                 detail=json.dumps(dict(push=applog.PUSH, mode=MODE, database=storage.backend_state())))
 
@@ -122,13 +142,51 @@ def scanner():
         time.sleep(max(0,INTERVAL-(time.monotonic()-tick)))
 
 class Handler(BaseHTTPRequestHandler):
+    def ingress_base(self):
+        """Home Assistant ingress prefix, only when this process is the HA app."""
+        if os.getenv('HASS_INGRESS') != '1':
+            return ''
+        base = (self.headers.get('X-Ingress-Path') or '').strip().rstrip('/')
+        if not base.startswith('/') or base.startswith('//') or any(c in base for c in '"\'<>&\n\r '):
+            return ''
+        return base
+
+    def ingress_user(self):
+        if not self.ingress_base():
+            return None
+        peer = (self.client_address or ('',))[0]
+        allowed = {'172.30.32.2'}
+        if os.getenv('HASS_INGRESS_TRUST_LOOPBACK') == '1':
+            allowed.add('127.0.0.1')
+        if peer not in allowed:
+            applog.warning('ingress request ignored', source='auth', detail=f'peer {peer}')
+            return None
+        name = (self.headers.get('X-Remote-User-Name')
+                or self.headers.get('X-Remote-User-Display-Name')
+                or self.headers.get('X-Remote-User-Id')
+                or 'homeassistant')
+        return str(name)[:80]
+
+    def loc(self, path):
+        return self.ingress_base() + path
+
+    def page(self, name, content_type):
+        text = Path(__file__).with_name(name).read_text(encoding='utf-8')
+        base = self.ingress_base()
+        if base and name.endswith(('.html',)):
+            text = text.replace('<head>', '<head><meta name="homescan-base" content="'+base+'">', 1)
+            text = text.replace('href="/', 'href="'+base+'/').replace('src="/', 'src="'+base+'/')
+        return self.send(200, text.encode(), content_type)
+
     def send(self, code, body, content_type='application/json', headers=None):
         self.send_response(code)
         self.send_header('Content-Type',content_type)
         self.send_header('Cache-Control','no-store')
         self.send_header('X-Content-Type-Options','nosniff')
-        self.send_header('X-Frame-Options','DENY')
-        self.send_header('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+        framed = "frame-ancestors *" if self.ingress_base() else "frame-ancestors 'none'"
+        if not self.ingress_base():
+            self.send_header('X-Frame-Options','DENY')
+        self.send_header('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; "+framed+"; base-uri 'none'")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.send_header('Content-Length',str(len(body)))
@@ -143,6 +201,8 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def same_origin(self):
+        if self.ingress_user():
+            return True
         origin = self.headers.get('Origin','')
         return (origin and urlsplit(origin).scheme in ('http','https')
                 and urlsplit(origin).netloc == self.headers.get('Host','')
@@ -153,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
         return auth.parse_cookie(self.headers.get('Cookie',''))
 
     def current_user(self):
-        return auth.session_user(self.session_token())
+        return self.ingress_user() or auth.session_user(self.session_token())
 
     def require_user(self):
         user = self.current_user()
@@ -161,7 +221,7 @@ class Handler(BaseHTTPRequestHandler):
         accept = self.headers.get('Accept','')
         if 'text/html' in accept or self.path in ('/','/index.html'):
             self.send_response(302)
-            self.send_header('Location','/login')
+            self.send_header('Location', self.loc('/login'))
             self.send_header('Cache-Control','no-store')
             self.end_headers()
             return None
@@ -172,17 +232,17 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         if parsed.path=='/login':
             if self.current_user():
-                self.send_response(302); self.send_header('Location','/'); self.end_headers(); return
-            return self.send(200,Path(__file__).with_name('login.html').read_bytes(),'text/html; charset=utf-8')
+                self.send_response(302); self.send_header('Location', self.loc('/')); self.end_headers(); return
+            return self.page('login.html', 'text/html; charset=utf-8')
         if parsed.path in ('/style.css','/login.js'):
             name = 'style.css' if parsed.path.endswith('.css') else 'login.js'
             mime = 'text/css; charset=utf-8' if name.endswith('.css') else 'application/javascript; charset=utf-8'
-            return self.send(200,Path(__file__).with_name(name).read_bytes(),mime)
+            return self.page(name, mime)
         if parsed.path in ('/','/app.js','/index.html'):
             if not self.require_user(): return
             name = 'index.html' if parsed.path in ('/','/index.html') else 'app.js'
             mime = 'text/html; charset=utf-8' if name=='index.html' else 'application/javascript; charset=utf-8'
-            return self.send(200,Path(__file__).with_name(name).read_bytes(),mime)
+            return self.page(name, mime)
         if self.path=='/ws':
             if not self.current_user(): return self.send(401,b'{"error":"Sign in required."}')
             return HUB.serve(self, devices_payload)
@@ -320,7 +380,33 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400,json.dumps({'error':str(exc)}).encode())
         self.send(200,b'{"ok":true}')
 
+def apply_addon_options():
+    """Read the Home Assistant app options file when this process is an app."""
+    global MODE, TOKEN, NETWORK
+    path = Path(os.getenv('HASS_OPTIONS', '/data/options.json'))
+    if not path.exists():
+        return
+    try:
+        opts = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return
+    if not isinstance(opts, dict):
+        return
+    if opts.get('scan_network'):
+        NETWORK = str(opts['scan_network']).strip()
+        os.environ['SCAN_NETWORK'] = NETWORK
+    if opts.get('ha_local_ip'):
+        os.environ['HA_LOCAL_IP'] = str(opts['ha_local_ip']).strip()
+    if opts.get('scan_mode') in ('nmap', 'agent'):
+        MODE = opts['scan_mode']
+        os.environ['SCAN_MODE'] = MODE
+    if opts.get('ingest_token'):
+        TOKEN = str(opts['ingest_token']).strip()
+        os.environ['INGEST_TOKEN'] = TOKEN
+
+
 if __name__=='__main__':
+    apply_addon_options()
     if MODE not in ('nmap','agent'): raise ValueError('Invalid SCAN_MODE')
     if MODE=='agent' and len(TOKEN)<32: raise ValueError('Set INGEST_TOKEN to at least 32 characters')
     if MODE=='nmap':
@@ -332,7 +418,7 @@ if __name__=='__main__':
         CLOUDFLARE.wake.set()
         threading.Thread(target=CLUSTER.run,daemon=True,name='homescan-ha').start()
         if MODE=='nmap': threading.Thread(target=scanner,daemon=True).start()
-        ThreadingHTTPServer(('0.0.0.0',80),Handler).serve_forever()
+        ThreadingHTTPServer(('0.0.0.0', int(os.getenv('PORT', '80'))), Handler).serve_forever()
     except Exception as exc:
         applog.exception('HomeScan process crashed', source='app', exc=exc)
         raise

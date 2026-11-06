@@ -158,7 +158,7 @@ class HaServerIntegrationTests(unittest.TestCase):
         self.cfg = Path(self.temp.name) / 'cf.json'
         self.cfg.write_text(json.dumps(dict(
             api_token='token-value-for-ha-tests', zone_id='zone', account_id='account',
-            zone_name='chancecox.com', installation_id='install-1')))
+            zone_name='example.com', installation_id='install-1')))
         storage.init(self.db)
         self.api = HaDNSAPI()
         self.cloudflare = Manager(self.db, self.cfg, lambda token: self.api)

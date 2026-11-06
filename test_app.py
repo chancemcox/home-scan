@@ -24,7 +24,7 @@ INGEST = 'ingest-token-for-homescan-tests-32b'
 
 class ListingAPI:
     def __init__(self):
-        self.zone = {'id': 'zone', 'name': 'chancecox.com', 'account': {'id': 'account'}}
+        self.zone = {'id': 'zone', 'name': 'example.com', 'account': {'id': 'account'}}
         self.tunnel = {
             'id': '11111111-2222-3333-4444-555555555555',
             'name': 'homescan',
@@ -33,13 +33,13 @@ class ListingAPI:
             'created_at': '2026-01-01T00:00:00Z',
             'connections': [{'id': 'c1'}],
         }
-        self.config = {'ingress': [{'hostname': 'nas.house.chancecox.com', 'service': 'http://192.168.2.5:80'},
+        self.config = {'ingress': [{'hostname': 'nas.house.example.com', 'service': 'http://192.168.2.5:80'},
                                    {'service': 'http_status:404'}]}
 
     def call(self, method, path, body=None):
         if method == 'GET' and path.startswith('/zones?'):
             if 'name=' in path:
-                return [dict(self.zone)] if 'chancecox.com' in path or 'house.chancecox.com' in path else []
+                return [dict(self.zone)] if 'example.com' in path or 'house.example.com' in path else []
             return [dict(self.zone)]
         if method == 'GET' and path.endswith('/configurations'):
             return {'config': json.loads(json.dumps(self.config))}
@@ -65,7 +65,7 @@ class AppServerTests(unittest.TestCase):
         cls.cfg.write_text(json.dumps({
             'api_token': 'dashboard-secret-token',
             'zone_id': 'zone',
-            'zone_name': 'chancecox.com',
+            'zone_name': 'example.com',
             'account_id': 'account',
             'tunnel_id': '11111111-2222-3333-4444-555555555555',
         }))
@@ -169,6 +169,41 @@ class AppServerTests(unittest.TestCase):
         self.assertEqual(code, 302)
         self.assertEqual(headers.get('Location'), '/login')
 
+    def test_home_assistant_ingress(self):
+        os.environ['HASS_INGRESS'] = '1'
+        os.environ['HASS_INGRESS_TRUST_LOOPBACK'] = '1'
+        headers = {
+            'X-Ingress-Path': '/api/hassio_ingress/abc',
+            'X-Remote-User-Name': 'resident',
+        }
+        try:
+            code, body, response_headers = self.get('/', headers=headers, auth=False)
+            self.assertEqual(code, 200)
+            self.assertIn(b'content="/api/hassio_ingress/abc"', body)
+            self.assertIn(b'href="/api/hassio_ingress/abc/style.css"', body)
+            self.assertIn(b'src="/api/hassio_ingress/abc/app.js"', body)
+            self.assertIn('frame-ancestors *', response_headers.get('Content-Security-Policy', ''))
+            self.assertIsNone(response_headers.get('X-Frame-Options'))
+            code, me, _ = self.get('/api/me', headers=headers, auth=False)
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(me)['username'], 'resident')
+            code, _, response_headers = self.get('/login', headers=headers, auth=False)
+            self.assertEqual(code, 302)
+            self.assertEqual(response_headers.get('Location'), '/api/hassio_ingress/abc/')
+            os.environ.pop('HASS_INGRESS_TRUST_LOOPBACK', None)
+            code, _, response_headers = self.get('/', headers=headers, auth=False)
+            self.assertEqual(code, 302)
+            self.assertEqual(response_headers.get('Location'), '/api/hassio_ingress/abc/login')
+            code, body, response_headers = self.get('/login', headers={
+                'X-Ingress-Path': '/bad"path',
+            }, auth=False)
+            self.assertEqual(code, 200)
+            self.assertNotIn(b'homescan-base', body)
+            self.assertIn('frame-ancestors \'none\'', response_headers.get('Content-Security-Policy', ''))
+        finally:
+            os.environ.pop('HASS_INGRESS', None)
+            os.environ.pop('HASS_INGRESS_TRUST_LOOPBACK', None)
+
     def test_login_remember_me_and_logout(self):
         code, payload, headers = self.post('/api/login', {
             'username': 'admin', 'password': self.password, 'remember': True
@@ -203,7 +238,7 @@ class AppServerTests(unittest.TestCase):
         self.assertEqual(tunnels['tunnels'][0]['name'], 'homescan')
         code, body, _ = self.get('/api/cloudflare/zones')
         self.assertEqual(code, 200)
-        self.assertEqual(json.loads(body)['zones'][0]['name'], 'chancecox.com')
+        self.assertEqual(json.loads(body)['zones'][0]['name'], 'example.com')
 
     def test_same_origin_required_for_settings(self):
         code, payload, _ = self.post('/api/cloudflare/sync', {}, origin=False)
@@ -222,7 +257,7 @@ class AppServerTests(unittest.TestCase):
                 })
         self.assertEqual(code, 200)
         self.assertTrue(payload['ok'])
-        self.assertEqual(payload['zone'], 'chancecox.com')
+        self.assertEqual(payload['zone'], 'example.com')
         saved = json.loads(self.cfg.read_text())
         self.assertEqual(saved['api_token'], 'rotated-cloudflare-api-token')
         self.assertNotIn('d1_database_id', saved)

@@ -1,0 +1,33 @@
+name: HomeScan
+version: "1.0.0"
+slug: homescan
+description: LAN device inventory, Cloudflare tunnels, and cluster failover
+url: https://github.com/chancemcox/home-scan
+arch:
+  - amd64
+  - aarch64
+startup: application
+boot: auto
+init: false
+host_network: true
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:lan-connect
+panel_title: HomeScan
+watchdog: http://[HOST]:[PORT:8099]/health
+privileged:
+  - NET_RAW
+  - NET_ADMIN
+environment:
+  HASS_INGRESS: "1"
+  PORT: "8099"
+options:
+  scan_network: 192.168.1.0/24
+  scan_mode: nmap
+  ha_local_ip: ""
+  ingest_token: ""
+schema:
+  scan_network: str
+  scan_mode: list(nmap|agent)
+  ha_local_ip: str?
+  ingest_token: password?

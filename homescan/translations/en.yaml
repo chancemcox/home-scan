@@ -1,0 +1,13 @@
+configuration:
+  scan_network:
+    name: Scan network
+    description: Private IPv4 subnet to scan with Nmap. At most 4096 addresses.
+  scan_mode:
+    name: Scan mode
+    description: nmap scans from this host. agent waits for an external scanner.
+  ha_local_ip:
+    name: This node's LAN IP
+    description: Optional address used when this node claims the shared cluster hostname.
+  ingest_token:
+    name: Agent ingest token
+    description: Required when scan mode is agent. At least 32 characters.

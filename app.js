@@ -1,4 +1,6 @@
 'use strict';
+const BASE=(document.querySelector('meta[name="homescan-base"]')||{}).content||'';
+const url=path=>BASE+path;
 const $=id=>document.getElementById(id);
 let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},haState={enabled:false,role:'',scanning:true},selected=null,editingTunnel=null,editingTunnelDetail=null,tunnelInventory=[],zoneInventory=[];
 let sortKey='hostname',sortDir=1;
@@ -82,7 +84,7 @@ async function openTunnel(id){
  editingTunnel=id;$('tunnel-edit-error').textContent='';$('tunnel-edit-save').disabled=true;
  $('tunnel-edit-id').textContent=id;$('tunnel-edit-name').value='Loading…';$('tunnel-edit-config').value='';$('tunnel-dialog').showModal();
  try{
-  const r=await fetch('/api/cloudflare/tunnel?id='+encodeURIComponent(id));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');
+  const r=await fetch(url('/api/cloudflare/tunnel?id='+encodeURIComponent(id)));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');
   editingTunnelDetail=result;$('tunnel-edit-name').value=result.name;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderPortEditors();renderTunnelLinks();$('tunnel-edit-save').disabled=false;
  }catch(e){$('tunnel-edit-error').textContent=e.message}
 }
@@ -132,13 +134,13 @@ function renderTunnelLinks(){
  for(const link of detail.links||[]){const row=document.createElement('div');row.className='linked-origin';const device=data.find(d=>d.device_id===link.device_id);const text=document.createElement('span');text.textContent=`${link.hostname||'*'}${link.path?' · '+link.path:''} → ${device?.hostname||device?.ip||link.device_id} · ${link.message||link.state}`;const remove=document.createElement('button');remove.type='button';remove.textContent='Unlink';remove.addEventListener('click',()=>removeTunnelLink(link.id));row.append(text,remove);list.append(row)}
 }
 async function reloadTunnelDetail(){
- const r=await fetch('/api/cloudflare/tunnel?id='+encodeURIComponent(editingTunnel));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');editingTunnelDetail=result;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderPortEditors();renderTunnelLinks();
+ const r=await fetch(url('/api/cloudflare/tunnel?id='+encodeURIComponent(editingTunnel)));const result=await r.json();if(!r.ok)throw Error(result.error||'Could not load tunnel');editingTunnelDetail=result;$('tunnel-edit-config').value=JSON.stringify(result.config,null,2);renderPortEditors();renderTunnelLinks();
 }
 async function removeTunnelLink(id){try{await post('/api/cloudflare/tunnels/link',{action:'delete',link_id:id});await reloadTunnelDetail()}catch(e){$('tunnel-edit-error').textContent=e.message}}
 async function loadTunnels(){
  $('tunnels-meta').textContent='Loading tunnels…';
  try{
-  const r=requireAuth(await fetch('/api/cloudflare/tunnels'));
+  const r=requireAuth(await fetch(url('/api/cloudflare/tunnels')));
   if(!r.ok)throw Error('Request failed');
   renderTunnels(await r.json());
  }catch(e){
@@ -153,7 +155,7 @@ async function openCreateRoute(preferredTunnel,preferredDevice){
  const devices=$('create-route-device');devices.replaceChildren();for(const d of data.filter(d=>d.mac).sort((a,b)=>(a.hostname||a.ip).localeCompare(b.hostname||b.ip))){const o=document.createElement('option');o.value=d.device_id;o.textContent=`${d.hostname||'Unnamed'} · ${d.ip} · ${d.mac}`;devices.append(o)}
  if(preferredDevice)devices.value=preferredDevice;
  const zones=$('create-route-zone');zones.replaceChildren();
- try{const r=await fetch('/api/cloudflare/zones');const result=await r.json();if(!r.ok||result.error)throw Error(result.error||'Could not load domains');zoneInventory=result.zones||[];for(const z of zoneInventory){const o=document.createElement('option');o.value=z.id;o.textContent=z.name;zones.append(o)}}catch(e){$('create-route-error').textContent=e.message}
+ try{const r=await fetch(url('/api/cloudflare/zones'));const result=await r.json();if(!r.ok||result.error)throw Error(result.error||'Could not load domains');zoneInventory=result.zones||[];for(const z of zoneInventory){const o=document.createElement('option');o.value=z.id;o.textContent=z.name;zones.append(o)}}catch(e){$('create-route-error').textContent=e.message}
  $('create-route-save').disabled=!tunnel.options.length||!zones.options.length||!devices.options.length;$('create-route-dialog').showModal();
 }
 function openDevice(d){
@@ -182,8 +184,8 @@ function openSettings(){
  updateDecoFields();
  $('settings-dialog').showModal();
 }
-function requireAuth(r){if(r.status===401){location.replace('/login');throw Error('Sign in required.')}return r}
-async function post(path,body){const r=requireAuth(await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}));const result=await r.json();if(!r.ok)throw Error(result.error||'Request failed');return result}
+function requireAuth(r){if(r.status===401){location.replace(url('/login'));throw Error('Sign in required.')}return r}
+async function post(path,body){const r=requireAuth(await fetch(url(path),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}));const result=await r.json();if(!r.ok)throw Error(result.error||'Request failed');return result}
 $('device-form').addEventListener('submit',async event=>{event.preventDefault();$('save-button').disabled=true;$('form-error').textContent='';try{await post('/api/cloudflare/settings',{device_id:selected,local:{enabled:$('local-enabled').checked,hostname:$('local-host').value},tunnel:{enabled:$('tunnel-enabled').checked,hostname:$('tunnel-host').value,protocol:$('tunnel-protocol').value,port:Number($('tunnel-port').value)}});$('device-dialog').close();await refresh()}catch(e){$('form-error').textContent=e.message}finally{$('save-button').disabled=false}});
 $('settings-form').addEventListener('submit',async event=>{
  event.preventDefault();$('settings-save').disabled=true;$('settings-error').textContent='';
@@ -244,7 +246,7 @@ $('connection-form').addEventListener('submit',async event=>{
  }catch(e){$('connection-error').textContent=e.message}
  finally{$('connection-save').disabled=false}
 });
-$('logout-button').addEventListener('click',async()=>{try{await fetch('/api/logout',{method:'POST'})}catch(_){}location.replace('/login')});
+$('logout-button').addEventListener('click',async()=>{try{await fetch(url('/api/logout'),{method:'POST'})}catch(_){}location.replace(url('/login'))});
 $('settings-button').addEventListener('click',openSettings);
 $('tunnels-refresh').addEventListener('click',loadTunnels);
 $('tunnel-create').addEventListener('click',()=>openCreateRoute());
@@ -301,7 +303,7 @@ async function refresh(){
  if(refreshing)return;
  refreshing=true;
  try{
-  const r=requireAuth(await fetch('/api/devices'));
+  const r=requireAuth(await fetch(url('/api/devices')));
   if(!r.ok)throw Error('Request failed');
   apply(await r.json());
   if(!live)schedulePoll(5000);
@@ -314,7 +316,7 @@ async function refresh(){
 }
 function connect(){
  clearTimeout(reconnectTimer);
- const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+ const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+url('/ws'));
  socket=ws;
  ws.addEventListener('open',()=>{live=true});
  ws.addEventListener('message',e=>{

@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -15,7 +16,7 @@ OTHER='02:66:77:88:99:AA'
 class FakeAPI:
     def __init__(self):
         self.records={}
-        self.config={'ingress':[{'hostname':'unrelated.chancecox.com','service':'http://10.0.0.9:8000'},{'service':'http_status:404'}]}
+        self.config={'ingress':[{'hostname':'unrelated.example.com','service':'http://10.0.0.9:8000'},{'service':'http_status:404'}]}
         self.writes=[]
         self.fail=False
         self.fail_dns_once=False
@@ -80,7 +81,7 @@ class TunnelEditingAPI:
 class RouteCreationAPI(TunnelEditingAPI):
     def __init__(self):
         super().__init__();self.records=[]
-        self.zones={'zone':{'id':'zone','name':'chancecox.com','account':{'id':'account'}},
+        self.zones={'zone':{'id':'zone','name':'example.com','account':{'id':'account'}},
                     'zone2':{'id':'zone2','name':'other.example','account':{'id':'account'}}}
     def call(self,method,path,body=None):
         if path in ('/zones/zone','/zones/zone2'): return copy.deepcopy(self.zones[path.rsplit('/',1)[-1]])
@@ -104,11 +105,11 @@ class RouteCreationAPI(TunnelEditingAPI):
 class SetupAPI:
     def __init__(self):
         self.token=None;self.writes=[];self.tunnels=[];self.tokens={};self.d1=[]
-        self.zone={'id':'zone','name':'chancecox.com','account':{'id':'account'}}
+        self.zone={'id':'zone','name':'example.com','account':{'id':'account'}}
     def call(self,method,path,body=None):
         if method=='GET' and path.startswith('/zones?'):
             name=parse_qs(urlsplit(path).query).get('name',[''])[0]
-            if not name or name in ('chancecox.com','house.chancecox.com', self.zone['name']):
+            if not name or name in ('example.com','house.example.com', self.zone['name']):
                 return [copy.deepcopy(self.zone)]
             return []
         if method=='GET' and path.endswith('/d1/database'):
@@ -134,7 +135,7 @@ class IntegrationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.db=str(Path(self.temp.name)/'test.db')
         self.cfg=Path(self.temp.name)/'cloudflare.json'
-        self.cfg.write_text(json.dumps(dict(api_token='test-secret',zone_id='zone',account_id='account',tunnel_id='tunnel',zone_name='chancecox.com',suffix='house.chancecox.com')))
+        self.cfg.write_text(json.dumps(dict(api_token='test-secret',zone_id='zone',account_id='account',tunnel_id='tunnel',zone_name='example.com',suffix='house.example.com')))
         storage.init(self.db)
         self.api=FakeAPI()
         self.m=Manager(self.db,self.cfg,lambda token:self.api);self.m.init()
@@ -150,7 +151,7 @@ class IntegrationTests(unittest.TestCase):
         api=SetupAPI();token_file=Path(self.temp.name)/'tunnel-token'
         result=connect_cloudflare(dict(api_token='brand-new-cloudflare-token',tunnel=False),self.cfg,lambda token:api,token_file)
         self.assertEqual(result['configured'],True)
-        self.assertEqual(result['zone'],'chancecox.com')
+        self.assertEqual(result['zone'],'example.com')
         self.assertTrue(result['database_shared'])
         self.assertEqual(result['d1_database_id'],'d1-homescan-id')
         saved=json.loads(self.cfg.read_text())
@@ -159,7 +160,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertFalse(token_file.exists())
         api2=SetupAPI();api2.d1=[{'uuid':'d1-homescan-id','name':'homescan'}]
         kept=connect_cloudflare(dict(api_token='',tunnel=False),self.cfg,lambda token:api2,token_file)
-        self.assertEqual(kept['zone'],'chancecox.com')
+        self.assertEqual(kept['zone'],'example.com')
         self.assertEqual(json.loads(self.cfg.read_text())['api_token'],'brand-new-cloudflare-token')
     def test_connect_creates_tunnel_and_connector_token(self):
         from cloudflare_sync import connect_cloudflare
@@ -181,7 +182,7 @@ class IntegrationTests(unittest.TestCase):
                 return super().call(method,path,body)
         with self.assertRaisesRegex(CloudflareError,'active Cloudflare zone'):
             connect_cloudflare(dict(api_token='brand-new-cloudflare-token',tunnel=False),cfg,lambda token:NoZone(),token_file)
-        cfg.write_text(json.dumps(dict(api_token='old-token-value-here',zone_id='other-zone',zone_name='chancecox.com',account_id='account')))
+        cfg.write_text(json.dumps(dict(api_token='old-token-value-here',zone_id='other-zone',zone_name='example.com',account_id='account')))
         with self.assertRaisesRegex(CloudflareError,'Zone changed'):
             connect_cloudflare(dict(api_token='brand-new-cloudflare-token',tunnel=False),cfg,lambda token:SetupAPI(),token_file)
     def test_manager_connect_queues_sync(self):
@@ -202,7 +203,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(next(r for r in records if r['type']=='A')['content'],'192.168.1.80')
         self.assertFalse(next(r for r in records if r['type']=='A')['proxied'])
         self.assertEqual(next(r for r in records if r['type']=='CNAME')['content'],'tunnel.cfargotunnel.com')
-        self.assertEqual(next(r for r in self.api.config['ingress'] if r.get('hostname')=='nas-web.house.chancecox.com')['service'],'http://192.168.1.80:8080')
+        self.assertEqual(next(r for r in self.api.config['ingress'] if r.get('hostname')=='nas-web.house.example.com')['service'],'http://192.168.1.80:8080')
         devices=storage.inventory(self.db)['devices'];self.assertEqual(len(devices),1)
         self.assertEqual(devices[0]['device_id'],self.did)
         self.assertEqual(len(self.m.public_state()['routes']),2)
@@ -219,16 +220,16 @@ class IntegrationTests(unittest.TestCase):
         self.m.sync_once();r=next(iter(self.api.records.values()))
         self.assertEqual(r['content'],'192.168.2.5');self.assertFalse(r['proxied'])
     def test_foreign_dns_is_not_overwritten(self):
-        self.api.records['foreign']=dict(id='foreign',name='nas.house.chancecox.com',type='A',content='10.0.0.5')
+        self.api.records['foreign']=dict(id='foreign',name='nas.house.example.com',type='A',content='10.0.0.5')
         self.save(tunnel=False);self.m.sync_once()
         self.assertEqual(self.api.writes,[])
         self.assertEqual(next(r for r in self.m.public_state()['routes'] if r['kind']=='local')['state'],'error')
     def test_rename_disable_preserve_unrelated_ingress(self):
         self.save();self.m.sync_once();self.save(localname='storage',tunnelname='storage-web');self.m.sync_once()
-        self.assertEqual({r['name'] for r in self.api.records.values()},{'storage.house.chancecox.com','storage-web.house.chancecox.com'})
+        self.assertEqual({r['name'] for r in self.api.records.values()},{'storage.house.example.com','storage-web.house.example.com'})
         self.save(False,False);self.m.sync_once()
         self.assertEqual(self.api.records,{})
-        self.assertEqual(self.api.config['ingress'],[{'hostname':'unrelated.chancecox.com','service':'http://10.0.0.9:8000'},{'service':'http_status:404'}])
+        self.assertEqual(self.api.config['ingress'],[{'hostname':'unrelated.example.com','service':'http://10.0.0.9:8000'},{'service':'http_status:404'}])
     def test_failed_cloudflare_does_not_block_scans(self):
         self.save();self.api.fail=True;self.m.sync_once()
         self.see('192.168.2.8')
@@ -238,7 +239,7 @@ class IntegrationTests(unittest.TestCase):
     def test_partial_tunnel_creation_recovers(self):
         self.save(local=False);self.api.fail_dns_once=True;self.m.sync_once();self.m.sync_once()
         self.assertEqual(len(self.api.records),1)
-        self.assertEqual(len([r for r in self.api.config['ingress'] if r.get('hostname')=='nas-web.house.chancecox.com']),1)
+        self.assertEqual(len([r for r in self.api.config['ingress'] if r.get('hostname')=='nas-web.house.example.com']),1)
     def test_deco_skip_keeps_timestamps_and_target(self):
         self.see('192.168.86.20',source='deco');self.save();self.m.sync_once()
         prior=storage.inventory(self.db)['devices'][0]['last_seen']
@@ -263,30 +264,49 @@ class IntegrationTests(unittest.TestCase):
         with storage.connect(self.db) as db:
             row=db.execute("SELECT hostname FROM cf_routes WHERE kind='tunnel'").fetchone()
         self.assertEqual(row['hostname'],'app.cdn.example.com')
+    def test_runtime_env_settings_are_stored(self):
+        os.environ['HA_HOSTNAME'] = 'homescan.house.example.com'
+        os.environ['HA_PORT'] = '8080'
+        os.environ['HA_ENABLED'] = '1'
+        os.environ['SCAN_MODE'] = 'agent'
+        os.environ['SCAN_NETWORK'] = '192.168.1.0/24'
+        self.addCleanup(lambda: [os.environ.pop(name, None) for name in (
+            'HA_HOSTNAME', 'HA_PORT', 'HA_ENABLED', 'SCAN_MODE', 'SCAN_NETWORK')])
+        payload = self.m.sync_shared_settings()
+        self.assertEqual(payload['ha_hostname'], 'homescan.house.example.com')
+        self.assertEqual(payload['ha_port'], '8080')
+        self.assertEqual(payload['ha_enabled'], '1')
+        self.assertEqual(payload['scan_mode'], 'agent')
+        self.assertEqual(payload['scan_network'], '192.168.1.0/24')
+        self.assertEqual(storage.get_settings(self.db)['scan_mode'], 'agent')
+        os.environ['SCAN_MODE'] = 'nmap'
+        again = self.m.sync_shared_settings()
+        self.assertEqual(again['scan_mode'], 'agent')
+
     def test_shared_settings_sync_and_suffix_backfill(self):
         from cloudflare_sync import infer_suffix_from_hostnames
         self.assertEqual(
             infer_suffix_from_hostnames(
-                ['cmcwin.house.chancecox.com','cam.house.chancecox.com'],
-                'chancecox.com'),
-            'house.chancecox.com')
+                ['desktop.house.example.com','cam.house.example.com'],
+                'example.com'),
+            'house.example.com')
         payload=self.m.sync_shared_settings()
-        self.assertEqual(payload['suffix'],'house.chancecox.com')
-        self.assertEqual(storage.get_settings(self.db)['suffix'],'house.chancecox.com')
-        self.assertEqual(storage.get_settings(self.db)['zone_name'],'chancecox.com')
+        self.assertEqual(payload['suffix'],'house.example.com')
+        self.assertEqual(storage.get_settings(self.db)['suffix'],'house.example.com')
+        self.assertEqual(storage.get_settings(self.db)['zone_name'],'example.com')
         raw=json.loads(self.cfg.read_text()); raw.pop('suffix',None); self.cfg.write_text(json.dumps(raw))
-        self.assertEqual(self.m.suffix(),'house.chancecox.com')
+        self.assertEqual(self.m.suffix(),'house.example.com')
         self.save(local=True,tunnel=False,localname='nas')
         with storage.connect(self.db) as db:
             db.execute('DELETE FROM app_settings')
         raw=json.loads(self.cfg.read_text()); raw.pop('suffix',None); self.cfg.write_text(json.dumps(raw))
         self.m.init()
-        self.assertEqual(self.m.suffix(),'house.chancecox.com')
-        self.assertEqual(json.loads(self.cfg.read_text())['suffix'],'house.chancecox.com')
-        self.assertEqual(storage.get_settings(self.db)['suffix'],'house.chancecox.com')
+        self.assertEqual(self.m.suffix(),'house.example.com')
+        self.assertEqual(json.loads(self.cfg.read_text())['suffix'],'house.example.com')
+        self.assertEqual(storage.get_settings(self.db)['suffix'],'house.example.com')
     def test_validation_and_hostname_collision(self):
-        for value in ('*.house.chancecox.com','nas.evil.com','a.b.house.chancecox.com','https://nas.house.chancecox.com/path'):
-            with self.assertRaises(ValueError): hostname(value, suffix='house.chancecox.com')
+        for value in ('*.house.example.com','nas.evil.com','a.b.house.example.com','https://nas.house.example.com/path'):
+            with self.assertRaises(ValueError): hostname(value, suffix='house.example.com')
         with self.assertRaises(ValueError): self.save(localname='same',tunnelname='same')
         with self.assertRaises(ValueError): self.save(port=65536)
         self.save(tunnel=False)
@@ -392,7 +412,7 @@ class TunnelEditingTests(unittest.TestCase):
         self.api=RouteCreationAPI();self.m=Manager(self.db,self.cfg,lambda token:self.api);self.m.init()
         result=self.m.create_tunnel_route(dict(tunnel_id=TunnelEditingAPI.TID,zone_id='zone',hostname='files.house',
                                                 device_id=self.did,protocol='http',port=80))
-        self.assertEqual(result['hostname'],'files.house.chancecox.com')  # zone name from fixture
+        self.assertEqual(result['hostname'],'files.house.example.com')  # zone name from fixture
 
     def test_delete_public_hostname_and_dns(self):
         self.api=RouteCreationAPI();self.m=Manager(self.db,self.cfg,lambda token:self.api);self.m.init()

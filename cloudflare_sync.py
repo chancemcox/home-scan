@@ -23,6 +23,16 @@ TOKEN_FILE = Path(os.getenv('CLOUDFLARE_TUNNEL_TOKEN','/run/homescan-tunnel/toke
 SHARED_SETTING_KEYS = (
     'suffix', 'zone_id', 'zone_name', 'account_id', 'tunnel_id',
     'installation_id', 'd1_database_id', 'cluster_worker_url',
+    'ha_hostname', 'ha_port', 'ha_enabled', 'scan_mode', 'scan_network',
+)
+# Process environment is the current stand-in for values that used to be hardcoded.
+# Empty values are not stored, so a generic code fallback never becomes the install record.
+RUNTIME_SETTING_ENV = (
+    ('ha_hostname', 'HA_HOSTNAME'),
+    ('ha_port', 'HA_PORT'),
+    ('ha_enabled', 'HA_ENABLED'),
+    ('scan_mode', 'SCAN_MODE'),
+    ('scan_network', 'SCAN_NETWORK'),
 )
 
 
@@ -49,6 +59,35 @@ class API:
             codes = ', '.join(str(e.get('code','unknown')) for e in result.get('errors',[]))
             raise CloudflareError('Cloudflare rejected the request (code '+codes+').')
         return result.get('result')
+
+
+def normalize_runtime_setting(key, value):
+    """Return a shared-settings value, or '' when the input should not be stored."""
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    if key == 'ha_hostname':
+        try:
+            return normalize_suffix(raw)
+        except ValueError:
+            return ''
+    if key == 'ha_port':
+        if not raw.isdigit() or not 1 <= int(raw) <= 65535:
+            return ''
+        return str(int(raw))
+    if key == 'ha_enabled':
+        return '0' if raw.lower() in ('0', 'false', 'no', 'off') else '1'
+    if key == 'scan_mode':
+        return raw if raw in ('nmap', 'agent') else ''
+    if key == 'scan_network':
+        try:
+            net = ipaddress.IPv4Network(raw, strict=False)
+        except ValueError:
+            return ''
+        if not net.is_private or net.num_addresses > 4096:
+            return ''
+        return str(net)
+    return raw
 
 
 def normalize_suffix(value):
@@ -241,6 +280,14 @@ class Manager:
                 if not local.get(key) and shared.get(key):
                     local[key] = shared[key]
                     changed = True
+            for key, env_name in RUNTIME_SETTING_ENV:
+                if local.get(key):
+                    continue
+                normalized = normalize_runtime_setting(key, os.getenv(env_name, ''))
+                if not normalized:
+                    continue
+                local[key] = normalized
+                changed = True
             if not local.get('suffix'):
                 try:
                     with storage.connect(self.db_path) as db:

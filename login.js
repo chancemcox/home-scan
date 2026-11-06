@@ -1,3 +1,5 @@
+const BASE = (document.querySelector('meta[name="homescan-base"]') || {}).content || '';
+const url = (path) => BASE + path;
 document.getElementById('login-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const error = document.getElementById('login-error');
@@ -5,7 +7,7 @@ document.getElementById('login-form').addEventListener('submit', async (event) =
   error.textContent = '';
   button.disabled = true;
   try {
-    const response = await fetch('/api/login', {
+    const response = await fetch(url('/api/login'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -16,7 +18,7 @@ document.getElementById('login-form').addEventListener('submit', async (event) =
     });
     const result = await response.json();
     if (!response.ok) throw Error(result.error || 'Sign in failed');
-    location.replace('/');
+    location.replace(url('/'));
   } catch (e) {
     error.textContent = e.message;
   } finally {
