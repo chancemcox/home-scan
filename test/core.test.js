@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { discoverScanNetworks } from '../server.js';
-import { parseScanNetworks } from '../lib/cloudflare.js';
+import { defaultClusterHostname, parseScanNetworks } from '../lib/cloudflare.js';
 import * as auth from '../lib/auth.js';
 
 test('reachable subnets come from the routing table', () => {
@@ -17,6 +17,24 @@ test('reachable subnets come from the routing table', () => {
     'lo 0000007F 00000000 0001 0 0 0 000000FF 0 0 0',
   ].join('\n');
   assert.deepEqual(discoverScanNetworks(routes), ['192.168.2.0/24', '192.168.1.0/24']);
+});
+
+test('a /32 host route expands to the covering LAN /24', () => {
+  const routes = [
+    'Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT',
+    'eth0 0002A8C0 00000000 0001 0 0 0 00FFFFFF 0 0 0',
+    'eth0 0156A8C0 00000000 0001 0 0 0 FFFFFFFF 0 0 0',
+    'eth0 00000000 0102A8C0 0003 0 0 0 00000000 0 0 0',
+  ].join('\n');
+  assert.deepEqual(discoverScanNetworks(routes), ['192.168.2.0/24', '192.168.86.0/24']);
+});
+
+test('cluster DNS prefers the connected Cloudflare zone over a mismatched base domain', () => {
+  assert.equal(
+    defaultClusterHostname({ zone_name: 'apparelishoweyeroll.com' }, 'chancecox.com'),
+    'homescan.apparelishoweyeroll.com',
+  );
+  assert.equal(defaultClusterHostname({}, 'chancecox.com'), 'homescan.chancecox.com');
 });
 
 test('scan networks accept several private subnets', () => {

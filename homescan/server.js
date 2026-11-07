@@ -59,6 +59,16 @@ function parseNetwork(cidr) {
   };
 }
 
+function scanCidrsFromRoute(net) {
+  if (!net || !net.private || net.loopback || net.linkLocal) return [];
+  if (net.prefix >= 20 && net.prefix <= 30 && net.size <= 4096) return [net.cidr];
+  if (net.prefix > 30) {
+    const covering = parseNetwork(`${net.cidr.split('/')[0]}/24`);
+    if (covering && covering.private && !covering.loopback && !covering.linkLocal && covering.size <= 4096) return [covering.cidr];
+  }
+  return [];
+}
+
 export function discoverScanNetworks(routeText = null) {
   if (routeText == null) {
     try { routeText = fs.readFileSync('/proc/net/route', 'utf8'); }
@@ -73,8 +83,8 @@ export function discoverScanNetworks(routeText = null) {
     let net;
     try { net = parseNetwork(`${routeAddress(cols[1])}/${prefixLength(routeAddress(cols[7]))}`); }
     catch { continue; }
-    if (!net || !net.private || net.loopback || net.linkLocal || net.size > 4096 || net.prefix < 20) continue;
-    if (!found.includes(net.cidr)) found.push(net.cidr);
+    const targets = scanCidrsFromRoute(net);
+    for (const cidr of targets) if (!found.includes(cidr)) found.push(cidr);
   }
   return found;
 }

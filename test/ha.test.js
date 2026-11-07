@@ -66,6 +66,15 @@ test('Cloudflare DNS 403 does not pause local scanning', async () => {
   assert.equal(node.publicState().scanning, true);
 });
 
+test('cluster hostname follows the connected zone when the base domain differs', () => {
+  const node = cluster({ hostname: '' }, mockCloudflare({
+    suffix: () => 'chancecox.com',
+    config: () => ({ api_token: 'token', zone_name: 'apparelishoweyeroll.com' }),
+    clusterHostname: () => 'homescan.apparelishoweyeroll.com',
+  }));
+  assert.equal(node.resolveHostname(), 'homescan.apparelishoweyeroll.com');
+});
+
 test('a node without cluster DNS still scans for Home Assistant', async () => {
   const node = cluster({ hostname: '' }, {
     suffix() { throw new Error('no suffix'); },
