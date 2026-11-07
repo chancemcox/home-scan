@@ -98,13 +98,24 @@ export function scanNetworkList() {
   return out;
 }
 
+function mergeScanNetwork(...parts) {
+  const out = [];
+  for (const part of parts) {
+    let nets = [];
+    try { nets = parseScanNetworks(String(part || '').trim()); } catch { continue; }
+    for (const cidr of nets) if (cidr && !out.includes(cidr)) out.push(cidr);
+  }
+  return out.join(',');
+}
+
 function applySharedRuntime(cfg) {
   if (['nmap', 'agent'].includes(cfg.scan_mode)) {
     MODE = cfg.scan_mode;
     process.env.SCAN_MODE = MODE;
   }
   if (cfg.scan_network) {
-    NETWORK = String(cfg.scan_network).trim();
+    // Union addon options with stored settings so a stale settings value cannot drop subnets.
+    NETWORK = mergeScanNetwork(NETWORK, cfg.scan_network) || NETWORK;
     process.env.SCAN_NETWORK = NETWORK;
   }
 }
@@ -216,14 +227,14 @@ function nmapSubnet(cidr) {
     // Fast LAN ping sweep: skip reverse DNS, cap RTT retries so lossy routes cannot stall the loop.
     const child = spawn('nmap', [
       '-sn', '-n',
-      '--max-retries', '1',
-      '--host-timeout', '1500ms',
-      '--max-rtt-timeout', '400ms',
-      '--initial-rtt-timeout', '100ms',
-      '--min-parallelism', '64',
+      '--max-retries', '2',
+      '--host-timeout', '3s',
+      '--max-rtt-timeout', '800ms',
+      '--initial-rtt-timeout', '200ms',
+      '--min-parallelism', '32',
       '-oX', '-',
       String(cidr),
-    ], { timeout: 45_000, killSignal: 'SIGKILL' });
+    ], { timeout: 90_000, killSignal: 'SIGKILL' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -566,7 +577,10 @@ export function applyAddonOptions() {
   let opts;
   try { opts = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
   if (!opts || typeof opts !== 'object') return;
-  if (opts.scan_network) { NETWORK = String(opts.scan_network).trim(); process.env.SCAN_NETWORK = NETWORK; }
+  if (opts.scan_network) {
+    NETWORK = mergeScanNetwork(NETWORK, opts.scan_network) || String(opts.scan_network).trim();
+    process.env.SCAN_NETWORK = NETWORK;
+  }
   if (opts.ha_local_ip) process.env.HA_LOCAL_IP = String(opts.ha_local_ip).trim();
   if (['nmap', 'agent'].includes(opts.scan_mode)) { MODE = opts.scan_mode; process.env.SCAN_MODE = MODE; }
   if (opts.ingest_token) { TOKEN = String(opts.ingest_token).trim(); process.env.INGEST_TOKEN = TOKEN; }
