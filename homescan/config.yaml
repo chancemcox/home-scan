@@ -1,5 +1,5 @@
 name: HomeScan
-version: "1.2.2"
+version: "1.2.3"
 slug: homescan
 description: LAN device inventory, Cloudflare tunnels, and cluster failover
 url: https://github.com/chancemcox/home-scan
@@ -21,6 +21,7 @@ privileged:
 environment:
   HASS_INGRESS: "1"
   PORT: "8099"
+  HA_PORT: "8099"
 options:
   scan_network: 192.168.1.0/24
   scan_mode: nmap

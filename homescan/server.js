@@ -206,7 +206,7 @@ function nmapSubnet(cidr) {
 async function scanner() {
   while (true) {
     const tick = Date.now();
-    if (!cluster.isLeader()) { await new Promise((resolve) => setTimeout(resolve, Math.max(1000, INTERVAL * 500))); continue; }
+    if (!cluster.acceptsScans()) { await new Promise((resolve) => setTimeout(resolve, Math.max(1000, INTERVAL * 500))); continue; }
     const started = storage.now();
     const hosts = [];
     const errors = [];
@@ -392,7 +392,7 @@ async function handlePost(req, res, pathname) {
     send(req, res, 401, '{"error":"Unauthorized"}');
     return;
   }
-  if (!cluster.isLeader()) {
+  if (!cluster.acceptsScans()) {
     send(req, res, 503, JSON.stringify({ error: `This HomeScan node is on standby. Point the scanner at ${cluster.hostname}:${cluster.port}.`, ha: cluster.publicState() }));
     return;
   }

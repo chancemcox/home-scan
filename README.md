@@ -89,7 +89,7 @@ Uses host networking and Nmap. Set `SCAN_NETWORK` for your subnet.
 
 HomeScan can run as a Home Assistant app and open from the sidebar. In Home Assistant, open **Settings → Apps → Add-on store → ⋮ → Repositories** and add `https://github.com/chancemcox/home-scan`. Install **HomeScan**, set the scan subnet, and start it. The sidebar session is the signed-in Home Assistant user. Nmap uses the host network so it can see the LAN.
 
-The app folder is `homescan/`. Home Assistant builds only that folder, so it contains its own copy of the server files. Keep those copies identical to the repository root.
+The app folder is `homescan/`. Home Assistant builds only that folder, so it contains its own copy of the server files. Keep those copies identical to the repository root. nmap keeps recording devices even if cluster DNS is waiting on Cloudflare.
 
 ## Durable Object worker
 
