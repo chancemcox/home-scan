@@ -308,7 +308,6 @@ function nmapSubnet(cidr) {
       '--max-rtt-timeout', '800ms',
       '--initial-rtt-timeout', '200ms',
       '--min-parallelism', '32',
-      '--dns-timeout', '2s',
       '-oX', '-',
       String(cidr),
     );
