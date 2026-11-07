@@ -56,8 +56,10 @@
 <fieldset>
 <legend>DNS base domain</legend>
 <label for="dns-suffix">Base domain</label>
-<input id="dns-suffix" placeholder="lan.example.com" autocomplete="off" required>
-<small>Your DNS base domain for local sync and short tunnel labels. Tunnel routes can still use any Cloudflare domain this token can edit.</small>
+<select id="dns-suffix" required>
+  <option value="">Loading domains…</option>
+</select>
+<small>Cloudflare domains this token can access. Used for local DNS, short tunnel labels, and cluster hostname.</small>
 </fieldset>
 <fieldset>
 <legend><label class="toggle"><input id="deco-enabled" type="checkbox">Deco support</label></legend>
