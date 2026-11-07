@@ -148,14 +148,26 @@ async function loadTunnels(){
   renderTunnels({tunnels:[],error:'Could not load Cloudflare tunnels.'})
  }
 }
+function fillZoneSelect(select,selectedId){
+ select.replaceChildren();
+ for(const z of zoneInventory){const o=document.createElement('option');o.value=z.id;o.textContent=z.name;select.append(o)}
+ if(selectedId)select.value=selectedId;
+}
+async function loadZones(){
+ const r=requireAuth(await fetch(url('/api/cloudflare/zones')));
+ const result=await r.json();
+ if(!r.ok||result.error)throw Error(result.error||'Could not load domains');
+ zoneInventory=result.zones||[];
+ return zoneInventory;
+}
 async function openCreateRoute(preferredTunnel,preferredDevice){
  $('create-route-error').textContent='';$('create-route-host').value='';
  const tunnel=$('create-route-tunnel');tunnel.replaceChildren();for(const t of tunnelInventory.filter(t=>t.editable)){const o=document.createElement('option');o.value=t.id;o.textContent=`${t.name} · ${t.status}`;tunnel.append(o)}
  if(preferredTunnel)tunnel.value=preferredTunnel;
  const devices=$('create-route-device');devices.replaceChildren();for(const d of data.filter(d=>d.mac).sort((a,b)=>(a.hostname||a.ip).localeCompare(b.hostname||b.ip))){const o=document.createElement('option');o.value=d.device_id;o.textContent=`${d.hostname||'Unnamed'} · ${d.ip} · ${d.mac}`;devices.append(o)}
  if(preferredDevice)devices.value=preferredDevice;
- const zones=$('create-route-zone');zones.replaceChildren();
- try{const r=await fetch(url('/api/cloudflare/zones'));const result=await r.json();if(!r.ok||result.error)throw Error(result.error||'Could not load domains');zoneInventory=result.zones||[];for(const z of zoneInventory){const o=document.createElement('option');o.value=z.id;o.textContent=z.name;zones.append(o)}}catch(e){$('create-route-error').textContent=e.message}
+ const zones=$('create-route-zone');
+ try{await loadZones();fillZoneSelect(zones,cf.zone_id||'')}catch(e){$('create-route-error').textContent=e.message;zones.replaceChildren()}
  $('create-route-save').disabled=!tunnel.options.length||!zones.options.length||!devices.options.length;$('create-route-dialog').showModal();
 }
 function openDevice(d){
@@ -173,9 +185,21 @@ function updateDecoFields(){
  for(const id of ['deco-host','deco-username','deco-password'])$(id).disabled=!on;
  $('deco-host').required=on;
 }
-function openSettings(){
+async function fillSettingsDomain(){
+ const select=$('dns-suffix');
+ const placeholder=(text)=>{select.replaceChildren();const o=document.createElement('option');o.value='';o.textContent=text;select.append(o);select.required=false};
+ if(!cf.configured){placeholder('Connect Cloudflare to load domains');select.disabled=true;return}
+ select.disabled=false;
+ try{
+  await loadZones();
+  if(!zoneInventory.length){placeholder('No domains on this token');return}
+  const current=zoneInventory.find(z=>z.name===cf.suffix)||zoneInventory.find(z=>z.name===cf.zone)||zoneInventory.find(z=>z.id===cf.zone_id)||zoneInventory[0];
+  fillZoneSelect(select,current.id);
+  select.required=true;
+ }catch(e){placeholder(e.message||'Could not load domains')}
+}
+async function openSettings(){
  $('scan-networks').textContent=(scanNetworks||[]).join('\n')||'No reachable private subnet found yet.';
- $('dns-suffix').value=(cf.suffix||'');
  $('deco-enabled').checked=!!decoState.enabled;
  $('deco-host').value=decoState.host||'';
  $('deco-username').value=decoState.username||'admin';
@@ -183,7 +207,10 @@ function openSettings(){
  $('deco-password-hint').textContent=decoState.password_set?'Password is set. Leave blank to keep it.':'Password is stored only on this HomeScan host.';
  $('settings-error').textContent='';
  updateDecoFields();
+ $('dns-suffix').replaceChildren();
+ const loading=document.createElement('option');loading.value='';loading.textContent='Loading domains…';$('dns-suffix').append(loading);
  $('settings-dialog').showModal();
+ await fillSettingsDomain();
 }
 function requireAuth(r){if(r.status===401){location.replace(url('/login'));throw Error('Sign in required.')}return r}
 async function post(path,body){const r=requireAuth(await fetch(url(path),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}));const result=await r.json();if(!r.ok)throw Error(result.error||'Request failed');return result}
@@ -191,10 +218,14 @@ $('device-form').addEventListener('submit',async event=>{event.preventDefault();
 $('settings-form').addEventListener('submit',async event=>{
  event.preventDefault();$('settings-save').disabled=true;$('settings-error').textContent='';
  try{
-  const domain=await post('/api/cloudflare/domain',{suffix:$('dns-suffix').value.trim()});
-  cf.suffix=domain.suffix||$('dns-suffix').value.trim();
-  if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
-  else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set base domain)'}
+  if(cf.configured){
+   const zoneId=$('dns-suffix').value;
+   if(!zoneId)throw Error('Choose a Cloudflare domain.');
+   const domain=await post('/api/cloudflare/domain',{zone_id:zoneId});
+   cf.suffix=domain.suffix;cf.zone=domain.zone||domain.suffix;cf.zone_id=domain.zone_id||zoneId;
+   if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
+   else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set base domain)'}
+  }
   const body={enabled:$('deco-enabled').checked,host:$('deco-host').value.trim(),username:$('deco-username').value.trim()||'admin'};
   const password=$('deco-password').value;
   if(password)body.password=password;

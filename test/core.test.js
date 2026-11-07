@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { discoverScanNetworks } from '../server.js';
-import { defaultClusterHostname, parseScanNetworks } from '../lib/cloudflare.js';
+import { defaultClusterHostname, parseScanNetworks, pickAvailableZone } from '../lib/cloudflare.js';
 import * as auth from '../lib/auth.js';
 
 test('reachable subnets come from the routing table', () => {
@@ -27,6 +27,17 @@ test('a /32 host route expands to the covering LAN /24', () => {
     'eth0 00000000 0102A8C0 0003 0 0 0 00000000 0 0 0',
   ].join('\n');
   assert.deepEqual(discoverScanNetworks(routes), ['192.168.2.0/24', '192.168.86.0/24']);
+});
+
+test('settings domain must be a Cloudflare zone this token can access', () => {
+  const zones = [
+    { id: 'zone-a', name: 'apparelishoweyeroll.com' },
+    { id: 'zone-c', name: 'chancecox.com' },
+  ];
+  assert.equal(pickAvailableZone(zones, { zone_id: 'zone-c' }).name, 'chancecox.com');
+  assert.equal(pickAvailableZone(zones, { suffix: 'apparelishoweyeroll.com' }).id, 'zone-a');
+  assert.throws(() => pickAvailableZone(zones, { suffix: 'example.com' }), /token can access/);
+  assert.throws(() => pickAvailableZone([], { zone_id: 'zone-c' }), /Connect Cloudflare/);
 });
 
 test('cluster DNS prefers the connected Cloudflare zone over a mismatched base domain', () => {

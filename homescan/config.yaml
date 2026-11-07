@@ -1,5 +1,5 @@
 name: HomeScan
-version: "1.2.4"
+version: "1.2.5"
 slug: homescan
 description: LAN device inventory, Cloudflare tunnels, and cluster failover
 url: https://github.com/chancemcox/home-scan
