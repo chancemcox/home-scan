@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { discoverScanNetworks } from '../server.js';
+import { discoverScanNetworks, parseNmapHosts } from '../server.js';
 import { defaultClusterHostname, parseScanNetworks, pickAvailableZone } from '../lib/cloudflare.js';
 import * as auth from '../lib/auth.js';
 
@@ -65,6 +65,15 @@ test('login is case insensitive and sessions expire from the cookie', async () =
   assert.equal(auth.sessionUser(result.token), 'admin');
   assert.equal(auth.parseCookie(auth.cookieHeader(result.token, false, null)), result.token);
   assert.throws(() => auth.login('admin', 'wrong-password-here'), /Invalid username or password/);
+});
+
+test('nmap XML keeps hosts even when stderr was noisy', () => {
+  const xml = `<?xml version="1.0"?>
+<nmaprun>
+<host><status state="up"/><address addr="192.168.86.10" addrtype="ipv4"/><address addr="AA:BB:CC:DD:EE:FF" addrtype="mac"/><hostnames><hostname name="nest"/></hostnames></host>
+<host><status state="down"/><address addr="192.168.86.11" addrtype="ipv4"/></host>
+</nmaprun>`;
+  assert.deepEqual(parseNmapHosts(xml), [{ ip: '192.168.86.10', mac: 'AA:BB:CC:DD:EE:FF', hostname: 'nest' }]);
 });
 
 test('a MAC replaces the provisional IP identity', async () => {

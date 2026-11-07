@@ -185,30 +185,61 @@ export function init() {
   applog.info('HomeScan started', { source: 'app', detail: JSON.stringify({ push: applog.PUSH, mode: MODE, database: storage.backendState() }) });
 }
 
+export function parseNmapHosts(xml) {
+  const hosts = [];
+  for (const block of String(xml || '').split(/<host(?:\s|>)/).slice(1)) {
+    if (!/state="up"/.test(block)) continue;
+    const addresses = {};
+    for (const match of block.matchAll(/<address([^>]*)>/g)) {
+      const addr = /addr="([^"]+)"/.exec(match[1]);
+      const type = /addrtype="([^"]+)"/.exec(match[1]);
+      if (addr && type) addresses[type[1]] = addr[1];
+    }
+    if (!addresses.ipv4) continue;
+    const name = /<hostname[^>]*name="([^"]*)"/.exec(block);
+    hosts.push({ ip: addresses.ipv4, mac: addresses.mac || '', hostname: name ? name[1] : '' });
+  }
+  return hosts;
+}
+
+function nmapFailureMessage(stderr, code, signal) {
+  const lines = String(stderr || '').split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !/RTTVAR/i.test(line));
+  if (lines.length) return lines.join('\n').slice(0, 500);
+  if (signal) return `nmap killed (${signal})`;
+  return `nmap exited ${code}`;
+}
+
 function nmapSubnet(cidr) {
   return new Promise((resolve, reject) => {
-    const child = spawn('nmap', ['-sn', '-R', '--host-timeout', '8s', '-oX', '-', String(cidr)], { timeout: 50_000 });
+    // Fast LAN ping sweep: skip reverse DNS, cap RTT retries so lossy routes cannot stall the loop.
+    const child = spawn('nmap', [
+      '-sn', '-n',
+      '--max-retries', '1',
+      '--host-timeout', '2s',
+      '--max-rtt-timeout', '500ms',
+      '--initial-rtt-timeout', '100ms',
+      '--min-parallelism', '64',
+      '-oX', '-',
+      String(cidr),
+    ], { timeout: 120_000 });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) { reject(new Error(stderr || `nmap exited ${code}`)); return; }
-      const hosts = [];
-      for (const block of stdout.split('<host').slice(1)) {
-        if (!/state="up"/.test(block)) continue;
-        const addresses = {};
-        for (const match of block.matchAll(/<address([^>]*)>/g)) {
-          const addr = /addr="([^"]+)"/.exec(match[1]);
-          const type = /addrtype="([^"]+)"/.exec(match[1]);
-          if (addr && type) addresses[type[1]] = addr[1];
+    child.on('close', (code, signal) => {
+      const hosts = parseNmapHosts(stdout);
+      if (code === 0 || hosts.length) {
+        if (code !== 0) {
+          applog.warning(`nmap ${cidr} ended early`, {
+            source: 'scanner',
+            detail: nmapFailureMessage(stderr, code, signal),
+          });
         }
-        if (!addresses.ipv4) continue;
-        const name = /<hostname[^>]*name="([^"]*)"/.exec(block);
-        hosts.push({ ip: addresses.ipv4, mac: addresses.mac || '', hostname: name ? name[1] : '' });
+        resolve(hosts);
+        return;
       }
-      resolve(hosts);
+      reject(new Error(nmapFailureMessage(stderr, code, signal)));
     });
   });
 }
