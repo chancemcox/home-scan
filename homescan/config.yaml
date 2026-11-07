@@ -1,5 +1,5 @@
 name: HomeScan
-version: "1.2.9"
+version: "1.2.10"
 slug: homescan
 description: LAN device inventory, Cloudflare tunnels, and cluster failover
 url: https://github.com/chancemcox/home-scan
@@ -15,6 +15,8 @@ ingress_port: 8099
 panel_icon: mdi:lan-connect
 panel_title: HomeScan
 watchdog: http://[HOST]:[PORT:8099]/health
+map:
+  - share:rw
 privileged:
   - NET_RAW
   - NET_ADMIN
@@ -23,7 +25,7 @@ environment:
   PORT: "8099"
   HA_PORT: "8099"
 options:
-  scan_network: 192.168.1.0/24
+  scan_network: 192.168.2.0/24,192.168.1.0/24
   scan_mode: nmap
   ha_local_ip: ""
   ingest_token: ""

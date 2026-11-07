@@ -89,9 +89,11 @@ export function discoverScanNetworks(routeText = null) {
 
 export function scanNetworkList() {
   const found = discoverScanNetworks();
-  if (found.length) return found;
-  try { return parseScanNetworks(NETWORK); }
-  catch { return []; }
+  let fallback = [];
+  try { fallback = parseScanNetworks(NETWORK); } catch { /* ignore invalid fallback */ }
+  const out = [];
+  for (const cidr of [...found, ...fallback]) if (cidr && !out.includes(cidr)) out.push(cidr);
+  return out;
 }
 
 function applySharedRuntime(cfg) {
@@ -295,15 +297,22 @@ function ingressBase(req) {
   return base;
 }
 
+function ingressPeerAllowed(peer) {
+  const normalized = String(peer || '').replace(/^::ffff:/, '');
+  if (process.env.HASS_INGRESS_TRUST_LOOPBACK === '1' && (normalized === '127.0.0.1' || normalized === '::1')) return true;
+  // Supervisor / ingress proxy addresses live on the hassio docker networks (172.30.32.0/23 historically,
+  // but peers such as 172.30.33.0 appear on current HA OS builds).
+  const parts = normalized.split('.').map(Number);
+  if (parts.length === 4 && parts.every((n) => Number.isInteger(n) && n >= 0 && n <= 255) && parts[0] === 172 && parts[1] === 30) return true;
+  return normalized === '172.30.32.2';
+}
+
 function ingressUser(req) {
   const base = ingressBase(req);
   if (!base) return null;
   const peer = req.socket.remoteAddress || '';
-  const normalized = peer.replace(/^::ffff:/, '');
-  const allowed = new Set(['172.30.32.2']);
-  if (process.env.HASS_INGRESS_TRUST_LOOPBACK === '1') allowed.add('127.0.0.1');
-  if (!allowed.has(normalized)) {
-    applog.warning('ingress request ignored', { source: 'auth', detail: `peer ${normalized}` });
+  if (!ingressPeerAllowed(peer)) {
+    applog.warning('ingress request ignored', { source: 'auth', detail: `peer ${String(peer).replace(/^::ffff:/, '')}` });
     return null;
   }
   return String(req.headers['x-remote-user-name'] || req.headers['x-remote-user-display-name'] || req.headers['x-remote-user-id'] || 'homeassistant').slice(0, 80);
@@ -553,6 +562,40 @@ export function applyAddonOptions() {
   if (opts.ingest_token) { TOKEN = String(opts.ingest_token).trim(); process.env.INGEST_TOKEN = TOKEN; }
 }
 
+function importSharedCloudflareToken() {
+  const candidates = [
+    process.env.HOMESCAN_CF_TOKEN_FILE || '',
+    '/share/homescan/cloudflare-token',
+    '/share/homescan/cloudflare-token.txt',
+  ].filter(Boolean);
+  for (const file of candidates) {
+    if (!fs.existsSync(file)) continue;
+    let token = '';
+    try { token = fs.readFileSync(file, 'utf8').trim().split(/\r?\n/)[0].trim(); } catch { continue; }
+    if (token.length < 20) continue;
+    try {
+      let cfg = {};
+      try { cfg = cloudflare.config(); } catch { cfg = {}; }
+      const result = cloudflare.connect({
+        api_token: token,
+        zone_name: cfg.zone_name || 'chancecox.com',
+        suffix: cfg.suffix || 'house.chancecox.com',
+        tunnel: true,
+      });
+      try { fs.unlinkSync(file); } catch { /* keep file if unlink fails */ }
+      applog.info('Imported Cloudflare token from share', {
+        source: 'cloudflare',
+        detail: JSON.stringify({ zone: result.zone_name || result.zone || '', suffix: result.suffix || '' }),
+      });
+      return true;
+    } catch (exc) {
+      applog.error('Shared Cloudflare token import failed', { source: 'cloudflare', detail: String(exc.message || exc) });
+      return false;
+    }
+  }
+  return false;
+}
+
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   applyAddonOptions();
@@ -562,6 +605,7 @@ if (isMain) {
   await storage.loadSqlite();
   try {
     init();
+    importSharedCloudflareToken();
     const server = http.createServer((req, res) => {
       const url = new URL(req.url, 'http://localhost');
       if (req.method === 'GET') handleGet(req, res, url.pathname, url.searchParams);

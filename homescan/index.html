@@ -25,8 +25,9 @@
 <div class="dialog-head"><h2>Connect Cloudflare</h2><button type="button" class="close" data-close="connection-dialog" aria-label="Close Cloudflare setup">×</button></div>
 <p id="connection-status"></p>
 <h3>1. Sign in and create your token</h3>
-<p><a class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in &amp; create token ↗</a></p>
-<p>Opens Cloudflare in a new tab. Sign in, then choose <strong>Create Token → Create Custom Token</strong>. Name it <strong>HomeScan</strong> and add these permissions:</p>
+<p><a class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in &amp; create user token ↗</a></p>
+<p>Use a <strong>User API Token</strong> from <strong>My Profile → API Tokens</strong> — not an Account API token. Account tokens cannot grant Zone DNS Edit, so cluster DNS and device hostnames will fail with authentication errors.</p>
+<p>Choose <strong>Create Token → Create Custom Token</strong>. Name it <strong>HomeScan</strong> and add these permissions:</p>
 <ul class="setup-permissions"><li><strong>Zone → Zone → Read</strong></li><li><strong>Zone → DNS → Edit</strong></li><li><strong>Account → Cloudflare Tunnel → Edit</strong> for tunnels</li></ul>
 <p>Under <strong>Zone Resources</strong>, choose <strong>Include → All zones from an account</strong> (do not pick individual zones — that hides the rest of your domains from HomeScan). Select <strong>Continue to summary → Create Token</strong>, then copy the token.</p>
 <h3>2. Save the token in HomeScan</h3>
