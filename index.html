@@ -28,7 +28,7 @@
 <p><a class="button-link primary" href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer">Log in &amp; create token ↗</a></p>
 <p>Opens Cloudflare in a new tab. Sign in, then choose <strong>Create Token → Create Custom Token</strong>. Name it <strong>HomeScan</strong> and add these permissions:</p>
 <ul class="setup-permissions"><li><strong>Zone → Zone → Read</strong></li><li><strong>Zone → DNS → Edit</strong></li><li><strong>Account → Cloudflare Tunnel → Edit</strong> for tunnels</li></ul>
-<p>Limit Zone Resources to the domains you want HomeScan to manage (or include all zones in the account). Select <strong>Continue to summary → Create Token</strong>, then copy the token.</p>
+<p>Under <strong>Zone Resources</strong>, choose <strong>Include → All zones from an account</strong> (do not pick individual zones — that hides the rest of your domains from HomeScan). Select <strong>Continue to summary → Create Token</strong>, then copy the token.</p>
 <h3>2. Save the token in HomeScan</h3>
 <label for="cf-token">API token</label>
 <input id="cf-token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste Cloudflare API token">
@@ -54,12 +54,20 @@
 <small>Taken from this host’s routes. Docker, Home Assistant, and other virtual networks are skipped, as are subnets larger than 4096 addresses.</small>
 </fieldset>
 <fieldset>
-<legend>DNS base domain</legend>
-<label for="dns-suffix">Base domain</label>
-<select id="dns-suffix" required>
+<legend>Local DNS domain</legend>
+<label for="dns-zone-filter">Filter zones</label>
+<input id="dns-zone-filter" type="search" placeholder="Search domains…" autocomplete="off" spellcheck="false">
+<label for="dns-zone">Cloudflare zone</label>
+<select id="dns-zone" required size="8">
   <option value="">Loading domains…</option>
 </select>
-<small>Cloudflare domains this token can access. Used for local DNS, short tunnel labels, and cluster hostname.</small>
+<small id="dns-zone-count">Zones this API token can access.</small>
+<label for="dns-suffix">DNS domain for devices</label>
+<input id="dns-suffix" placeholder="house.example.com" autocomplete="off" spellcheck="false">
+<small>Hostnames become <span class="mono">name.&lt;domain&gt;</span> — for example <span class="mono">nas.house.example.com</span>. Must be the selected zone or a subdomain of it.</small>
+<label for="dns-subnet">Subnet for DNS targets</label>
+<input id="dns-subnet" placeholder="192.168.1.0/24" autocomplete="off" spellcheck="false">
+<small>Optional. Local DNS and tunnel origins only sync when the device IP is inside this private subnet. Leave blank to allow any scanned LAN IP.</small>
 </fieldset>
 <fieldset>
 <legend><label class="toggle"><input id="deco-enabled" type="checkbox">Deco support</label></legend>

@@ -4,7 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { discoverScanNetworks, parseNmapHosts } from '../server.js';
-import { defaultClusterHostname, parseScanNetworks, pickAvailableZone } from '../lib/cloudflare.js';
+import {
+  defaultClusterHostname, ipInCidr, parseDnsSubnet, parseScanNetworks,
+  pickAvailableZone, suffixUnderZone,
+} from '../lib/cloudflare.js';
 import * as auth from '../lib/auth.js';
 
 test('reachable subnets come from the routing table', () => {
@@ -52,6 +55,21 @@ test('scan networks accept several private subnets', () => {
   assert.deepEqual(parseScanNetworks('192.168.2.0/24, 10.0.0.0/24'), ['192.168.2.0/24', '10.0.0.0/24']);
   assert.throws(() => parseScanNetworks('8.8.8.8/32'), /private/);
   assert.throws(() => parseScanNetworks('not-a-subnet'), /not an IPv4 subnet/);
+});
+
+test('local DNS domain can be a subdomain under the Cloudflare zone', () => {
+  assert.equal(suffixUnderZone('', 'example.com'), 'example.com');
+  assert.equal(suffixUnderZone('house.example.com', 'example.com'), 'house.example.com');
+  assert.equal(suffixUnderZone('*.house.example.com', 'example.com'), 'house.example.com');
+  assert.throws(() => suffixUnderZone('other.com', 'example.com'), /subdomain/);
+});
+
+test('DNS subnet constrains which LAN IPs local DNS may publish', () => {
+  assert.equal(parseDnsSubnet(''), '');
+  assert.equal(parseDnsSubnet('192.168.1.0/24'), '192.168.1.0/24');
+  assert.equal(ipInCidr('192.168.1.50', '192.168.1.0/24'), true);
+  assert.equal(ipInCidr('192.168.2.50', '192.168.1.0/24'), false);
+  assert.throws(() => parseDnsSubnet('8.8.8.0/24'), /private/);
 });
 
 test('login is case insensitive and sessions expire from the cookie', async () => {

@@ -148,10 +148,19 @@ async function loadTunnels(){
   renderTunnels({tunnels:[],error:'Could not load Cloudflare tunnels.'})
  }
 }
-function fillZoneSelect(select,selectedId){
+function fillZoneSelect(select,selectedId,filter=''){
+ const q=String(filter||'').trim().toLowerCase();
+ const rows=q?zoneInventory.filter(z=>z.name.toLowerCase().includes(q)):zoneInventory.slice();
  select.replaceChildren();
- for(const z of zoneInventory){const o=document.createElement('option');o.value=z.id;o.textContent=z.name;select.append(o)}
- if(selectedId)select.value=selectedId;
+ if(!rows.length){const o=document.createElement('option');o.value='';o.textContent=q?'No domains match this filter':'No domains on this token';select.append(o);return}
+ for(const z of rows){const o=document.createElement('option');o.value=z.id;o.textContent=z.name;select.append(o)}
+ if(selectedId){
+  if([...select.options].some(o=>o.value===selectedId))select.value=selectedId;
+  else{
+   const keep=zoneInventory.find(z=>z.id===selectedId);
+   if(keep){const o=document.createElement('option');o.value=keep.id;o.textContent=keep.name;select.prepend(o);select.value=keep.id}
+  }
+ }
 }
 async function loadZones(){
  const r=requireAuth(await fetch(url('/api/cloudflare/zones')));
@@ -185,17 +194,35 @@ function updateDecoFields(){
  for(const id of ['deco-host','deco-username','deco-password'])$(id).disabled=!on;
  $('deco-host').required=on;
 }
+function syncDnsDomainPlaceholder(){
+ const zone=zoneInventory.find(z=>z.id===$('dns-zone').value);
+ const input=$('dns-suffix');
+ if(!input)return;
+ input.placeholder=zone?('house.'+zone.name):'house.example.com';
+ if(!input.value.trim()&&zone)input.value=cf.suffix&&(cf.suffix===zone.name||cf.suffix.endsWith('.'+zone.name))?cf.suffix:zone.name;
+}
+function updateDnsZoneCount(){
+ const el=$('dns-zone-count');
+ if(!el)return;
+ const n=zoneInventory.length;
+ if(!n){el.textContent='No domains visible to this API token.';return}
+ el.textContent=n+' domain'+(n===1?'':'s')+' available to this API token.'+(n<5?' Recreate the token with Zone Resources → All zones from an account to see the rest.':'');
+}
 async function fillSettingsDomain(){
- const select=$('dns-suffix');
- const placeholder=(text)=>{select.replaceChildren();const o=document.createElement('option');o.value='';o.textContent=text;select.append(o);select.required=false};
+ const select=$('dns-zone');
+ const placeholder=(text)=>{select.replaceChildren();const o=document.createElement('option');o.value='';o.textContent=text;select.append(o);select.required=false;$('dns-suffix').disabled=true;$('dns-subnet').disabled=true;if($('dns-zone-filter'))$('dns-zone-filter').disabled=true;updateDnsZoneCount()};
  if(!cf.configured){placeholder('Connect Cloudflare to load domains');select.disabled=true;return}
- select.disabled=false;
+ select.disabled=false;$('dns-suffix').disabled=false;$('dns-subnet').disabled=false;if($('dns-zone-filter'))$('dns-zone-filter').disabled=false;
  try{
   await loadZones();
   if(!zoneInventory.length){placeholder('No domains on this token');return}
-  const current=zoneInventory.find(z=>z.name===cf.suffix)||zoneInventory.find(z=>z.name===cf.zone)||zoneInventory.find(z=>z.id===cf.zone_id)||zoneInventory[0];
-  fillZoneSelect(select,current.id);
+  const current=zoneInventory.find(z=>z.id===cf.zone_id)||zoneInventory.find(z=>z.name===cf.zone)||zoneInventory.find(z=>cf.suffix===z.name||(cf.suffix||'').endsWith('.'+z.name))||zoneInventory[0];
+  fillZoneSelect(select,current.id,$('dns-zone-filter')?.value||'');
   select.required=true;
+  $('dns-suffix').value=cf.suffix||current.name||'';
+  $('dns-subnet').value=cf.dns_subnet||'';
+  updateDnsZoneCount();
+  syncDnsDomainPlaceholder();
  }catch(e){placeholder(e.message||'Could not load domains')}
 }
 async function openSettings(){
@@ -207,8 +234,10 @@ async function openSettings(){
  $('deco-password-hint').textContent=decoState.password_set?'Password is set. Leave blank to keep it.':'Password is stored only on this HomeScan host.';
  $('settings-error').textContent='';
  updateDecoFields();
- $('dns-suffix').replaceChildren();
- const loading=document.createElement('option');loading.value='';loading.textContent='Loading domains…';$('dns-suffix').append(loading);
+ $('dns-zone').replaceChildren();
+ const loading=document.createElement('option');loading.value='';loading.textContent='Loading domains…';$('dns-zone').append(loading);
+ $('dns-suffix').value=cf.suffix||'';
+ $('dns-subnet').value=cf.dns_subnet||'';
  $('settings-dialog').showModal();
  await fillSettingsDomain();
 }
@@ -219,10 +248,12 @@ $('settings-form').addEventListener('submit',async event=>{
  event.preventDefault();$('settings-save').disabled=true;$('settings-error').textContent='';
  try{
   if(cf.configured){
-   const zoneId=$('dns-suffix').value;
-   if(!zoneId)throw Error('Choose a Cloudflare domain.');
-   const domain=await post('/api/cloudflare/domain',{zone_id:zoneId});
-   cf.suffix=domain.suffix;cf.zone=domain.zone||domain.suffix;cf.zone_id=domain.zone_id||zoneId;
+   const zoneId=$('dns-zone').value;
+   if(!zoneId)throw Error('Choose a Cloudflare zone.');
+   const dnsDomain=$('dns-suffix').value.trim();
+   if(!dnsDomain)throw Error('Enter a DNS domain such as house.example.com.');
+   const domain=await post('/api/cloudflare/domain',{zone_id:zoneId,suffix:dnsDomain,dns_subnet:$('dns-subnet').value.trim()});
+   cf.suffix=domain.suffix;cf.zone=domain.zone||domain.suffix;cf.zone_id=domain.zone_id||zoneId;cf.dns_subnet=domain.dns_subnet||'';
    if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
    else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set base domain)'}
   }
@@ -286,6 +317,19 @@ $('tunnel-add-hostname').addEventListener('click',()=>{
  $('tunnel-dialog').close();openCreateRoute(editingTunnel,linked);
 });
 $('sync-button').addEventListener('click',async()=>{try{await post('/api/cloudflare/sync',{});$('cloud-state').textContent='Cloudflare sync queued…'}catch(e){$('notice').textContent=e.message}});
+$('dns-zone-filter')?.addEventListener('input',()=>{
+ fillZoneSelect($('dns-zone'),$('dns-zone').value,$('dns-zone-filter').value);
+});
+$('dns-zone')?.addEventListener('change',()=>{
+ const zone=zoneInventory.find(z=>z.id===$('dns-zone').value);
+ if(!zone)return;
+ const current=$('dns-suffix').value.trim().toLowerCase().replace(/\.+$/,'');
+ if(!current||current===(cf.zone||'')||current.endsWith('.'+(cf.zone||''))){
+  const keep=current&&(current===zone.name||current.endsWith('.'+zone.name))?current:'';
+  $('dns-suffix').value=keep||(cf.suffix&&(cf.suffix===zone.name||cf.suffix.endsWith('.'+zone.name))?cf.suffix:zone.name);
+ }
+ syncDnsDomainPlaceholder();
+});
 $('search').addEventListener('input',render);
 $('filter-status').addEventListener('change',render);
 $('filter-cloudflare').addEventListener('change',render);

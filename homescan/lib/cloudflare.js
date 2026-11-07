@@ -10,7 +10,7 @@ export const CONFIG = process.env.CLOUDFLARE_CONFIG || '/data/cloudflare.json';
 export const TOKEN_FILE = process.env.CLOUDFLARE_TUNNEL_TOKEN || '/run/homescan-tunnel/token';
 export const SHARED_SETTING_KEYS = [
   'suffix', 'zone_id', 'zone_name', 'account_id', 'tunnel_id',
-  'installation_id', 'cluster_worker_url',
+  'installation_id', 'cluster_worker_url', 'dns_subnet',
   'ha_hostname', 'ha_port', 'ha_enabled', 'scan_mode', 'scan_network',
 ];
 export const RUNTIME_SETTING_ENV = [
@@ -19,6 +19,7 @@ export const RUNTIME_SETTING_ENV = [
   ['ha_enabled', 'HA_ENABLED'],
   ['scan_mode', 'SCAN_MODE'],
   ['scan_network', 'SCAN_NETWORK'],
+  ['dns_subnet', 'DNS_SUBNET'],
 ];
 const OLD_SUFFIXES = (process.env.HOMESCAN_OLD_SUFFIXES || '').split(',').map((item) => item.trim()).filter(Boolean);
 
@@ -132,6 +133,38 @@ export function parseScanNetworks(value, limit = 16) {
   return nets;
 }
 
+export function parseDnsSubnet(value) {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return '';
+  return parseScanNetworks(raw, 1)[0];
+}
+
+export function ipInCidr(ip, cidr) {
+  const addr = ipv4Parts(ip);
+  if (!addr) return false;
+  let net;
+  try { net = parseNetwork(cidr); }
+  catch { return false; }
+  const ipNum = ((addr[0] << 24) | (addr[1] << 16) | (addr[2] << 8) | addr[3]) >>> 0;
+  const [netAddr] = String(net.cidr).split('/');
+  const netParts = ipv4Parts(netAddr);
+  if (!netParts) return false;
+  const base = ((netParts[0] << 24) | (netParts[1] << 16) | (netParts[2] << 8) | netParts[3]) >>> 0;
+  const mask = net.prefix === 0 ? 0 : (0xffffffff << (32 - net.prefix)) >>> 0;
+  return ((ipNum & mask) >>> 0) === ((base & mask) >>> 0);
+}
+
+export function suffixUnderZone(suffixValue, zoneName) {
+  const zone = normalizeSuffix(zoneName);
+  const raw = String(suffixValue || '').trim();
+  if (!raw) return zone;
+  const suffix = normalizeSuffix(raw);
+  if (suffix !== zone && !suffix.endsWith('.' + zone)) {
+    throw new Error('Local DNS domain must be ' + zone + ' or a subdomain such as house.' + zone);
+  }
+  return suffix;
+}
+
 function parseNetwork(value) {
   const [addr, prefixRaw] = String(value).split('/');
   const prefix = Number(prefixRaw);
@@ -162,6 +195,7 @@ export function normalizeRuntimeSetting(key, value) {
   if (key === 'ha_enabled') return ['0', 'false', 'no', 'off'].includes(raw.toLowerCase()) ? '0' : '1';
   if (key === 'scan_mode') return ['nmap', 'agent'].includes(raw) ? raw : '';
   if (key === 'scan_network') { try { return parseScanNetworks(raw).join(','); } catch { return ''; } }
+  if (key === 'dns_subnet') { try { return parseDnsSubnet(raw); } catch { return ''; } }
   return raw;
 }
 
@@ -390,17 +424,25 @@ export class Manager {
     const listed = this.listZones();
     if (listed.error && !(listed.zones || []).length) throw new Error(listed.error);
     const chosen = pickAvailableZone(listed.zones, body || {});
+    const suffix = suffixUnderZone(body && (body.suffix || body.dns_suffix), chosen.name);
+    let dnsSubnet = '';
+    if (body && Object.prototype.hasOwnProperty.call(body, 'dns_subnet')) {
+      dnsSubnet = parseDnsSubnet(body.dns_subnet);
+    } else {
+      try { dnsSubnet = parseDnsSubnet(readConfig(this.configPath).dns_subnet); } catch { dnsSubnet = ''; }
+    }
     const cfg = readConfig(this.configPath);
-    cfg.suffix = chosen.name;
+    cfg.suffix = suffix;
     cfg.zone_id = chosen.id;
     cfg.zone_name = chosen.name;
+    cfg.dns_subnet = dnsSubnet;
     if (chosen.account_id) cfg.account_id = chosen.account_id;
     atomicJson(this.configPath, cfg);
     storage.setSettings(this.dbPath, {
-      suffix: chosen.name, zone_id: chosen.id, zone_name: chosen.name,
+      suffix, zone_id: chosen.id, zone_name: chosen.name, dns_subnet: dnsSubnet,
       ...(chosen.account_id ? { account_id: chosen.account_id } : {}),
     });
-    return { ok: true, suffix: chosen.name, zone: chosen.name, zone_id: chosen.id };
+    return { ok: true, suffix, zone: chosen.name, zone_id: chosen.id, dns_subnet: dnsSubnet };
   }
   saveScanNetworks(body) {
     const nets = parseScanNetworks(body && typeof body === 'object' ? body.networks : body);
@@ -418,10 +460,12 @@ export class Manager {
       db.execute('SELECT * FROM cf_routes').fetchall(),
       db.execute('SELECT * FROM cf_tunnel_links').fetchall(),
     ]);
+    let dnsSubnet = '';
+    try { dnsSubnet = parseDnsSubnet(cfg.dns_subnet); } catch { dnsSubnet = ''; }
     return {
       configured: Boolean(cfg.api_token), zone: cfg.zone_name, zone_id: cfg.zone_id || '', tunnel_id: cfg.tunnel_id || '',
-      tunnel_configured: Boolean(cfg.tunnel_id), suffix: this.suffix(), routes, tunnel_links: links,
-      database: storage.backendState(),
+      tunnel_configured: Boolean(cfg.tunnel_id), suffix: this.suffix(), dns_subnet: dnsSubnet,
+      routes, tunnel_links: links, database: storage.backendState(),
     };
   }
   _tunnelApi() {
@@ -849,6 +893,13 @@ export class Manager {
       return;
     }
     const ip = privateIp(device.ip);
+    let dnsSubnet = '';
+    try { dnsSubnet = parseDnsSubnet(cfg.dns_subnet); } catch { dnsSubnet = ''; }
+    if (dnsSubnet && !ipInCidr(ip, dnsSubnet)) {
+      for (const resource of resources) this.cleanup(api, cfg, resource);
+      this.status(route, 'waiting', `Waiting for an IP in ${dnsSubnet} (now ${ip}).`);
+      return;
+    }
     const name = route.hostname;
     for (const resource of resources) if (resource.hostname !== name || resource.kind !== route.kind) this.cleanup(api, cfg, resource);
     const zone = this.zoneFor(api, cfg, name);
