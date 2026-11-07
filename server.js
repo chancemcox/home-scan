@@ -61,11 +61,9 @@ function parseNetwork(cidr) {
 
 function scanCidrsFromRoute(net) {
   if (!net || !net.private || net.loopback || net.linkLocal) return [];
-  if (net.prefix >= 20 && net.prefix <= 30 && net.size <= 4096) return [net.cidr];
-  if (net.prefix > 30) {
-    const covering = parseNetwork(`${net.cidr.split('/')[0]}/24`);
-    if (covering && covering.private && !covering.loopback && !covering.linkLocal && covering.size <= 4096) return [covering.cidr];
-  }
+  // Keep ordinary LAN prefixes. Host routes stay /32 — expanding them to a /24
+  // forces nmap across a single next hop and stalls on RTTVAR for unreachable peers.
+  if (net.prefix >= 20 && net.prefix <= 32 && net.size <= 4096) return [net.cidr];
   return [];
 }
 
@@ -239,7 +237,13 @@ function nmapSubnet(cidr) {
         resolve(hosts);
         return;
       }
-      reject(new Error(nmapFailureMessage(stderr, code, signal)));
+      // Lossy or routed targets often exit non-zero with only RTTVAR noise and no hosts.
+      // Keep the scan loop healthy so other subnets can still refresh inventory.
+      applog.warning(`nmap ${cidr} found no hosts`, {
+        source: 'scanner',
+        detail: nmapFailureMessage(stderr, code, signal),
+      });
+      resolve([]);
     });
   });
 }

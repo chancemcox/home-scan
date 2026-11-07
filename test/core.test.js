@@ -19,14 +19,14 @@ test('reachable subnets come from the routing table', () => {
   assert.deepEqual(discoverScanNetworks(routes), ['192.168.2.0/24', '192.168.1.0/24']);
 });
 
-test('a /32 host route expands to the covering LAN /24', () => {
+test('a /32 host route stays a single-host scan target', () => {
   const routes = [
     'Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT',
     'eth0 0002A8C0 00000000 0001 0 0 0 00FFFFFF 0 0 0',
     'eth0 0156A8C0 00000000 0001 0 0 0 FFFFFFFF 0 0 0',
     'eth0 00000000 0102A8C0 0003 0 0 0 00000000 0 0 0',
   ].join('\n');
-  assert.deepEqual(discoverScanNetworks(routes), ['192.168.2.0/24', '192.168.86.0/24']);
+  assert.deepEqual(discoverScanNetworks(routes), ['192.168.2.0/24', '192.168.86.1/32']);
 });
 
 test('settings domain must be a Cloudflare zone this token can access', () => {

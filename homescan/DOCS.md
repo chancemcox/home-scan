@@ -12,7 +12,7 @@ HomeScan records devices on your LAN, keeps Cloudflare tunnel routes lined up wi
 
 ## Options
 
-- **Scan network**: used only when this host has no reachable private subnet of its own. Otherwise HomeScan reads the host routes and scans each private subnet it can reach, skipping Docker and Home Assistant internal networks. Host routes such as `/32` are expanded to the covering `/24`.
+- **Scan network**: used only when this host has no reachable private subnet of its own. Otherwise HomeScan reads the host routes and scans each private subnet it can reach, skipping Docker and Home Assistant internal networks. Host routes such as `/32` are scanned as that single address.
 - **Base domain**: choose from the Cloudflare zones this token can access. That selection is the connected zone for local DNS, tunnel labels, and cluster hostname.
 - **Scan mode**: `nmap` scans from this host. `agent` waits for an external scanner and requires an ingest token of at least 32 characters.
 - **This node's LAN IP**: optional address used when this node claims the shared cluster hostname.
