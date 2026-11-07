@@ -151,7 +151,14 @@ export class Cluster {
   }
   resolveHostname() {
     if (this.hostname) return this.hostname;
-    try { const suffix = this.cloudflare.suffix(); if (suffix) return 'homescan.' + suffix; } catch { /* ignore */ }
+    try {
+      if (typeof this.cloudflare.clusterHostname === 'function') return this.cloudflare.clusterHostname();
+      const cfg = typeof this.cloudflare.config === 'function' ? this.cloudflare.config() : {};
+      const zone = String((cfg || {}).zone_name || '').trim().toLowerCase().replace(/\.+$/, '');
+      if (zone) return 'homescan.' + zone;
+      const suffix = this.cloudflare.suffix();
+      if (suffix) return 'homescan.' + suffix;
+    } catch { /* ignore */ }
     return '';
   }
   publicState() {

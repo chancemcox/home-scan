@@ -7,5 +7,6 @@ textarea{width:100%;padding:12px;background:#0e192a;border:1px solid #38506c;col
 
 
 .button-link{display:inline-block;padding:10px 15px;border:1px solid var(--mint);border-radius:8px;text-decoration:none;font-size:15px;line-height:normal}.button-link:hover{filter:brightness(1.08)}.button-link:focus-visible{outline:2px solid var(--mint);outline-offset:3px}.setup-permissions{padding-left:22px;line-height:1.9;color:var(--muted)}dialog h3{font-size:16px;margin-top:24px}
+#scan-networks{white-space:pre-wrap}
 .login-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at top, #1a2d46 0%, var(--bg) 55%)}.login-shell{width:min(420px,calc(100vw - 28px));margin:24px}.login-card{background:linear-gradient(160deg,#18283e,#121e30);border:1px solid var(--line);border-radius:16px;padding:28px}.login-card h1{margin:8px 0 10px}.login-card .primary{width:100%;margin-top:8px}.remember{margin:14px 0 6px}
 
