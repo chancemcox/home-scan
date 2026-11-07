@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { attachMacs, discoverScanNetworks, parseNmapHosts, readArpTable } from '../server.js';
+import { attachMacs, discoverScanNetworks, normalizeHostname, parseNmapHosts, readArpTable, resolveHostnames } from '../server.js';
 import * as storageMod from '../lib/storage.js';
 import {
   defaultClusterHostname, ipInCidr, parseDnsSubnet, parseScanNetworks,
@@ -93,6 +93,25 @@ test('nmap XML keeps hosts even when stderr was noisy', () => {
 <host><status state="down"/><address addr="192.168.86.11" addrtype="ipv4"/></host>
 </nmaprun>`;
   assert.deepEqual(parseNmapHosts(xml), [{ ip: '192.168.86.10', mac: 'AA:BB:CC:DD:EE:FF', hostname: 'nest' }]);
+});
+
+test('hostname helper strips trailing dots and bare IPs', () => {
+  assert.equal(normalizeHostname('nest.local.'), 'nest.local');
+  assert.equal(normalizeHostname('192.168.1.10'), '');
+  assert.equal(normalizeHostname(''), '');
+});
+
+test('PTR lookup fills missing hostnames after the scan', async () => {
+  const hosts = [
+    { ip: '192.168.2.50', mac: '', hostname: '' },
+    { ip: '192.168.2.1', mac: '', hostname: 'gateway' },
+  ];
+  await resolveHostnames(hosts, async (ip) => {
+    if (ip === '192.168.2.50') return ['living-room-pc.lan.'];
+    throw new Error('no ptr');
+  });
+  assert.equal(hosts[0].hostname, 'living-room-pc.lan');
+  assert.equal(hosts[1].hostname, 'gateway');
 });
 
 test('ARP table fills missing MACs for on-link hosts', () => {

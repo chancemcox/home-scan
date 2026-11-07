@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import dns from 'node:dns/promises';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -210,12 +211,41 @@ export function parseNmapHosts(xml) {
       if (addr && type) addresses[String(type[1]).toLowerCase()] = addr[1];
     }
     if (!addresses.ipv4) continue;
-    const name = /<hostname[^>]*name="([^"]*)"/i.exec(block);
+    const names = [...block.matchAll(/<hostname[^>]*name="([^"]*)"/gi)]
+      .map((match) => normalizeHostname(match[1]))
+      .filter(Boolean);
     hosts.push({
       ip: addresses.ipv4,
       mac: storage.macAddress(addresses.mac || ''),
-      hostname: name ? name[1] : '',
+      hostname: names[0] || '',
     });
+  }
+  return hosts;
+}
+
+export function normalizeHostname(value) {
+  const name = String(value || '').trim().replace(/\.+$/, '');
+  if (!name || /^[\d.]+$/.test(name)) return '';
+  return name.slice(0, 255);
+}
+
+export async function resolveHostnames(hosts, lookup = dns.reverse, timeoutMs = 1500) {
+  const missing = hosts.filter((host) => host && host.ip && !host.hostname);
+  const queue = 16;
+  for (let i = 0; i < missing.length; i += queue) {
+    const batch = missing.slice(i, i + queue);
+    await Promise.all(batch.map(async (host) => {
+      try {
+        const names = await Promise.race([
+          lookup(host.ip),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
+        ]);
+        const picked = Array.isArray(names)
+          ? names.map((name) => normalizeHostname(name)).find(Boolean)
+          : normalizeHostname(names);
+        if (picked) host.hostname = picked;
+      } catch { /* no PTR / timed out */ }
+    }));
   }
   return hosts;
 }
@@ -267,10 +297,10 @@ function nmapFailureMessage(stderr, code, signal) {
 
 function nmapSubnet(cidr) {
   return new Promise((resolve, reject) => {
-    // Fast LAN ping sweep: skip reverse DNS, cap RTT retries so lossy routes cannot stall the loop.
+    // LAN ping sweep with reverse DNS enabled so device names can populate.
     // On-link subnets use ARP ping (-PR) so nmap returns MAC addresses; routed subnets cannot.
     const onLink = cidrIsOnLink(cidr);
-    const args = ['-sn', '-n'];
+    const args = ['-sn'];
     if (onLink) args.push('-PR');
     args.push(
       '--max-retries', '2',
@@ -278,10 +308,11 @@ function nmapSubnet(cidr) {
       '--max-rtt-timeout', '800ms',
       '--initial-rtt-timeout', '200ms',
       '--min-parallelism', '32',
+      '--dns-timeout', '2s',
       '-oX', '-',
       String(cidr),
     );
-    const child = spawn('nmap', args, { timeout: 90_000, killSignal: 'SIGKILL' });
+    const child = spawn('nmap', args, { timeout: 120_000, killSignal: 'SIGKILL' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -290,6 +321,7 @@ function nmapSubnet(cidr) {
     child.on('close', (code, signal) => {
       const hosts = attachMacs(parseNmapHosts(stdout));
       const withMac = hosts.filter((host) => host.mac).length;
+      const withName = hosts.filter((host) => host.hostname).length;
       if (code === 0 || hosts.length) {
         if (code !== 0) {
           applog.warning(`nmap ${cidr} ended early`, {
@@ -297,7 +329,7 @@ function nmapSubnet(cidr) {
             detail: nmapFailureMessage(stderr, code, signal),
           });
         }
-        applog.info(`nmap ${cidr} found ${hosts.length} host${hosts.length === 1 ? '' : 's'} (${withMac} with MAC)`, {
+        applog.info(`nmap ${cidr} found ${hosts.length} host${hosts.length === 1 ? '' : 's'} (${withMac} with MAC, ${withName} named)`, {
           source: 'scanner',
           detail: onLink ? 'on-link ARP' : 'routed',
         });
@@ -333,12 +365,14 @@ async function scanner() {
     }
     try {
       attachMacs(hosts);
+      await resolveHostnames(hosts);
       const withMac = hosts.filter((host) => host.mac).length;
+      const withName = hosts.filter((host) => host.hostname).length;
       storage.recordBatches(DB, [{ source: 'network', hosts, started, error: hosts.length || !errors.length ? null : errors.join('; ').slice(0, 1000) }]);
       cloudflare.wake.set();
       publish();
       writeShareStatus();
-      applog.info(`scan cycle recorded ${hosts.length} host${hosts.length === 1 ? '' : 's'} across ${nets.length} network${nets.length === 1 ? '' : 's'} (${withMac} with MAC)`, {
+      applog.info(`scan cycle recorded ${hosts.length} host${hosts.length === 1 ? '' : 's'} across ${nets.length} network${nets.length === 1 ? '' : 's'} (${withMac} with MAC, ${withName} named)`, {
         source: 'scanner',
         detail: errors.length ? errors.join('; ').slice(0, 500) : '',
       });
@@ -661,6 +695,7 @@ function writeShareStatus() {
     devices: inventory.devices.length,
     seen: inventory.devices.filter((d) => d.online).length,
     with_mac: inventory.devices.filter((d) => d.mac).length,
+    with_name: inventory.devices.filter((d) => d.hostname).length,
     networks: scanNetworkList(),
     ha: cluster ? cluster.publicState() : null,
   };
