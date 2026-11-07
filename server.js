@@ -2,11 +2,12 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as applog from './lib/applog.js';
 import * as auth from './lib/auth.js';
-import { CloudflareError, Manager, parseScanNetworks } from './lib/cloudflare.js';
+import { CloudflareError, Manager, ipInCidr, parseScanNetworks } from './lib/cloudflare.js';
 import { Cluster } from './lib/ha.js';
 import { ClusterState } from './lib/clusterState.js';
 import * as deco from './lib/deco.js';
@@ -204,15 +205,57 @@ export function parseNmapHosts(xml) {
     if (!/state="up"/.test(block)) continue;
     const addresses = {};
     for (const match of block.matchAll(/<address([^>]*)>/g)) {
-      const addr = /addr="([^"]+)"/.exec(match[1]);
-      const type = /addrtype="([^"]+)"/.exec(match[1]);
-      if (addr && type) addresses[type[1]] = addr[1];
+      const addr = /addr="([^"]+)"/i.exec(match[1]);
+      const type = /addrtype="([^"]+)"/i.exec(match[1]);
+      if (addr && type) addresses[String(type[1]).toLowerCase()] = addr[1];
     }
     if (!addresses.ipv4) continue;
-    const name = /<hostname[^>]*name="([^"]*)"/.exec(block);
-    hosts.push({ ip: addresses.ipv4, mac: addresses.mac || '', hostname: name ? name[1] : '' });
+    const name = /<hostname[^>]*name="([^"]*)"/i.exec(block);
+    hosts.push({
+      ip: addresses.ipv4,
+      mac: storage.macAddress(addresses.mac || ''),
+      hostname: name ? name[1] : '',
+    });
   }
   return hosts;
+}
+
+export function readArpTable(text = null) {
+  if (text == null) {
+    try { text = fs.readFileSync('/proc/net/arp', 'utf8'); }
+    catch { return new Map(); }
+  }
+  const map = new Map();
+  for (const line of String(text || '').split(/\r?\n/).slice(1)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 4) continue;
+    const [ip, , flags, mac] = cols;
+    if (!ip || flags === '0x0' || !mac || mac === '00:00:00:00:00:00') continue;
+    const normalized = storage.macAddress(mac);
+    if (normalized) map.set(ip, normalized);
+  }
+  return map;
+}
+
+export function attachMacs(hosts, arp = null) {
+  const table = arp || readArpTable();
+  for (const host of hosts) {
+    if (host.mac) continue;
+    const mac = table.get(host.ip);
+    if (mac) host.mac = mac;
+  }
+  return hosts;
+}
+
+function cidrIsOnLink(cidr) {
+  for (const addrs of Object.values(os.networkInterfaces() || {})) {
+    for (const addr of addrs || []) {
+      if ((addr.family !== 'IPv4' && addr.family !== 4) || addr.internal) continue;
+      try { if (ipInCidr(addr.address, cidr)) return true; }
+      catch { /* ignore bad interface data */ }
+    }
+  }
+  return false;
 }
 
 function nmapFailureMessage(stderr, code, signal) {
@@ -225,8 +268,11 @@ function nmapFailureMessage(stderr, code, signal) {
 function nmapSubnet(cidr) {
   return new Promise((resolve, reject) => {
     // Fast LAN ping sweep: skip reverse DNS, cap RTT retries so lossy routes cannot stall the loop.
-    const child = spawn('nmap', [
-      '-sn', '-n',
+    // On-link subnets use ARP ping (-PR) so nmap returns MAC addresses; routed subnets cannot.
+    const onLink = cidrIsOnLink(cidr);
+    const args = ['-sn', '-n'];
+    if (onLink) args.push('-PR');
+    args.push(
       '--max-retries', '2',
       '--host-timeout', '3s',
       '--max-rtt-timeout', '800ms',
@@ -234,14 +280,16 @@ function nmapSubnet(cidr) {
       '--min-parallelism', '32',
       '-oX', '-',
       String(cidr),
-    ], { timeout: 90_000, killSignal: 'SIGKILL' });
+    );
+    const child = spawn('nmap', args, { timeout: 90_000, killSignal: 'SIGKILL' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', reject);
     child.on('close', (code, signal) => {
-      const hosts = parseNmapHosts(stdout);
+      const hosts = attachMacs(parseNmapHosts(stdout));
+      const withMac = hosts.filter((host) => host.mac).length;
       if (code === 0 || hosts.length) {
         if (code !== 0) {
           applog.warning(`nmap ${cidr} ended early`, {
@@ -249,7 +297,10 @@ function nmapSubnet(cidr) {
             detail: nmapFailureMessage(stderr, code, signal),
           });
         }
-        applog.info(`nmap ${cidr} found ${hosts.length} host${hosts.length === 1 ? '' : 's'}`, { source: 'scanner' });
+        applog.info(`nmap ${cidr} found ${hosts.length} host${hosts.length === 1 ? '' : 's'} (${withMac} with MAC)`, {
+          source: 'scanner',
+          detail: onLink ? 'on-link ARP' : 'routed',
+        });
         resolve(hosts);
         return;
       }
@@ -281,11 +332,13 @@ async function scanner() {
       }
     }
     try {
+      attachMacs(hosts);
+      const withMac = hosts.filter((host) => host.mac).length;
       storage.recordBatches(DB, [{ source: 'network', hosts, started, error: hosts.length || !errors.length ? null : errors.join('; ').slice(0, 1000) }]);
       cloudflare.wake.set();
       publish();
       writeShareStatus();
-      applog.info(`scan cycle recorded ${hosts.length} host${hosts.length === 1 ? '' : 's'} across ${nets.length} network${nets.length === 1 ? '' : 's'}`, {
+      applog.info(`scan cycle recorded ${hosts.length} host${hosts.length === 1 ? '' : 's'} across ${nets.length} network${nets.length === 1 ? '' : 's'} (${withMac} with MAC)`, {
         source: 'scanner',
         detail: errors.length ? errors.join('; ').slice(0, 500) : '',
       });
@@ -607,6 +660,7 @@ function writeShareStatus() {
     zones,
     devices: inventory.devices.length,
     seen: inventory.devices.filter((d) => d.online).length,
+    with_mac: inventory.devices.filter((d) => d.mac).length,
     networks: scanNetworkList(),
     ha: cluster ? cluster.publicState() : null,
   };

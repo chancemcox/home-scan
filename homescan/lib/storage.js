@@ -281,16 +281,22 @@ export function recordBatches(dbPath, batches) {
           db.execute('DELETE FROM ip_assignments WHERE device_id=? AND ip<>?', [did, ip]);
           db.execute('INSERT OR REPLACE INTO ip_assignments VALUES(?,?,?)', [ip, did, stamp]);
         } else {
-          const known = db.execute('SELECT 1 FROM ip_assignments WHERE ip=?', [ip]).fetchone();
-          if (known) {
-            db.execute('INSERT INTO sightings VALUES(?,?,?,?,?)', [sid, ip, name, mac, did]);
+          const known = db.execute('SELECT device_id FROM ip_assignments WHERE ip=?', [ip]).fetchone();
+          if (known && known.device_id) {
+            db.execute('INSERT INTO sightings VALUES(?,?,?,?,?)', [sid, ip, name, mac, known.device_id]);
+            db.execute(
+              `UPDATE devices SET last_seen=?, scan_id=?, hostname=CASE WHEN ?='' THEN hostname ELSE ? END WHERE device_id=?`,
+              [stamp, sid, name, name, known.device_id],
+            );
+            db.execute('INSERT OR REPLACE INTO device_sources VALUES(?,?,?,?)', [known.device_id, source, stamp, sid]);
             continue;
           }
         }
         db.execute('INSERT INTO sightings VALUES(?,?,?,?,?)', [sid, ip, name, mac, did]);
         db.execute(`INSERT INTO devices VALUES(?,?,?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET
           ip=excluded.ip,hostname=CASE WHEN excluded.hostname='' THEN devices.hostname ELSE excluded.hostname END,
-          mac=excluded.mac,first_seen=min(devices.first_seen,excluded.first_seen),last_seen=excluded.last_seen,scan_id=excluded.scan_id`,
+          mac=CASE WHEN excluded.mac='' THEN devices.mac ELSE excluded.mac END,
+          first_seen=min(devices.first_seen,excluded.first_seen),last_seen=excluded.last_seen,scan_id=excluded.scan_id`,
         [did, ip, name, mac, first, stamp, sid]);
         db.execute('INSERT OR REPLACE INTO device_sources VALUES(?,?,?,?)', [did, source, stamp, sid]);
       }

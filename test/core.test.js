@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { discoverScanNetworks, parseNmapHosts } from '../server.js';
+import { attachMacs, discoverScanNetworks, parseNmapHosts, readArpTable } from '../server.js';
+import * as storageMod from '../lib/storage.js';
 import {
   defaultClusterHostname, ipInCidr, parseDnsSubnet, parseScanNetworks,
   pickAvailableZone, suffixUnderZone,
@@ -92,6 +93,32 @@ test('nmap XML keeps hosts even when stderr was noisy', () => {
 <host><status state="down"/><address addr="192.168.86.11" addrtype="ipv4"/></host>
 </nmaprun>`;
   assert.deepEqual(parseNmapHosts(xml), [{ ip: '192.168.86.10', mac: 'AA:BB:CC:DD:EE:FF', hostname: 'nest' }]);
+});
+
+test('ARP table fills missing MACs for on-link hosts', () => {
+  const arp = readArpTable([
+    'IP address       HW type     Flags       HW address            Mask     Device',
+    '192.168.2.50     0x1         0x2         58:d8:12:47:d9:ab     *        eth0',
+    '192.168.2.99     0x1         0x0         00:00:00:00:00:00     *        eth0',
+  ].join('\n'));
+  assert.equal(arp.get('192.168.2.50'), '58:D8:12:47:D9:AB');
+  assert.equal(arp.has('192.168.2.99'), false);
+  const hosts = attachMacs([{ ip: '192.168.2.50', mac: '', hostname: '' }, { ip: '192.168.2.1', mac: 'AA:BB:CC:DD:EE:FF', hostname: 'gw' }], arp);
+  assert.equal(hosts[0].mac, '58:D8:12:47:D9:AB');
+  assert.equal(hosts[1].mac, 'AA:BB:CC:DD:EE:FF');
+});
+
+test('empty MAC updates do not wipe a known address', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'homescan-mac-'));
+  const dbPath = path.join(dir, 'homescan.db');
+  await storageMod.loadSqlite();
+  storageMod.useSqlite();
+  storageMod.init(dbPath);
+  storageMod.recordBatches(dbPath, [{ source: 'network', hosts: [{ ip: '192.168.2.20', mac: '10:22:33:44:55:66', hostname: 'cam' }] }]);
+  storageMod.recordBatches(dbPath, [{ source: 'network', hosts: [{ ip: '192.168.2.20', mac: '', hostname: 'cam' }] }]);
+  const inventory = storageMod.inventory(dbPath);
+  assert.equal(inventory.devices.length, 1);
+  assert.equal(inventory.devices[0].mac, '10:22:33:44:55:66');
 });
 
 test('a MAC replaces the provisional IP identity', async () => {
