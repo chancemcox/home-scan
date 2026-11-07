@@ -24,6 +24,27 @@ const OLD_SUFFIXES = (process.env.HOMESCAN_OLD_SUFFIXES || '').split(',').map((i
 
 export class CloudflareError extends Error {}
 
+function apiError(response) {
+  const result = response && response.payload;
+  const details = result && typeof result === 'object'
+    ? (result.errors || []).map((item) => item.message || item.code).filter(Boolean).join('; ')
+    : '';
+  if (response && response.status === 403) {
+    return new CloudflareError(details || 'Cloudflare HTTP 403. Grant Zone DNS Edit for the connected zone, then retry.');
+  }
+  if (details) return new CloudflareError(details);
+  if (response && response.status >= 400) return new CloudflareError(`Cloudflare HTTP ${response.status}. Check token permissions or retry later.`);
+  return new CloudflareError('Cloudflare could not be reached. Retrying automatically.');
+}
+
+export function defaultClusterHostname(cfg = {}, suffix = '') {
+  const zone = String(cfg.zone_name || '').trim().toLowerCase().replace(/\.+$/, '');
+  if (zone) return 'homescan.' + zone;
+  const base = String(suffix || '').trim().toLowerCase().replace(/\.+$/, '');
+  if (base) return 'homescan.' + base;
+  return '';
+}
+
 export class API {
   constructor(token) { this.token = token; }
   call(method, apiPath, body = undefined) {
@@ -40,14 +61,8 @@ export class API {
       throw new CloudflareError('Cloudflare could not be reached. Retrying automatically.');
     }
     const result = response.payload;
-    if (!result || typeof result !== 'object') {
-      if (response.status >= 400) throw new CloudflareError(`Cloudflare HTTP ${response.status}. Check token permissions or retry later.`);
-      throw new CloudflareError('Cloudflare could not be reached. Retrying automatically.');
-    }
-    if (response.status >= 400) throw new CloudflareError(`Cloudflare HTTP ${response.status}. Check token permissions or retry later.`);
-    if (!result.success) {
-      const codes = (result.errors || []).map((item) => item.code || 'unknown').join(', ');
-      throw new CloudflareError('Cloudflare rejected the request (code ' + codes + ').');
+    if (!result || typeof result !== 'object' || response.status >= 400 || result.success === false) {
+      throw apiError(response);
     }
     return result.result;
   }
@@ -346,6 +361,13 @@ export class Manager {
   suffix() {
     try { return this.config().suffix ? normalizeSuffix(this.config().suffix) : ''; }
     catch { return ''; }
+  }
+  clusterHostname(explicit = '') {
+    const name = String(explicit || '').trim().toLowerCase().replace(/\.+$/, '');
+    if (name) return name;
+    let cfg = {};
+    try { cfg = this.config(); } catch { cfg = {}; }
+    return defaultClusterHostname(cfg, this.suffix());
   }
   saveDomain(body) {
     const suffix = normalizeSuffix(body.suffix || body.domain);
@@ -723,13 +745,17 @@ export class Manager {
   }
   ensureHaDns(ip, hostnameValue = null) {
     ip = privateIp(ip);
-    const suffix = this.suffix();
-    let name = String(hostnameValue || '').trim().toLowerCase().replace(/\.+$/, '');
-    if (!name && suffix) name = 'homescan.' + suffix;
-    if (!name) throw new Error('Set HA_HOSTNAME or a base domain before updating cluster DNS.');
-    if (suffix && !name.endsWith('.' + suffix)) throw new Error('HA hostname must be under ' + suffix);
     let cfg = {};
     try { cfg = this.config(); } catch { cfg = {}; }
+    const suffix = this.suffix();
+    const zoneName = String(cfg.zone_name || '').trim().toLowerCase().replace(/\.+$/, '');
+    let name = String(hostnameValue || '').trim().toLowerCase().replace(/\.+$/, '');
+    if (!name) name = this.clusterHostname();
+    if (!name) throw new Error('Set HA_HOSTNAME or a base domain before updating cluster DNS.');
+    const roots = [...new Set([suffix, zoneName].filter(Boolean))];
+    if (roots.length && !roots.some((root) => name === root || name.endsWith('.' + root))) {
+      throw new Error('HA hostname must be under ' + roots.join(' or '));
+    }
     if (!cfg.api_token || !cfg.account_id) throw new Error('Connect Cloudflare before HA failover can update DNS.');
     const api = this.apiFactory(cfg.api_token);
     const zone = this.zoneFor(api, cfg, name);
