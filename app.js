@@ -299,7 +299,12 @@ function applyStatus(){
  else if(decoState.auth_cooldown)$('deco-state').textContent='Deco: auth cooldown';
  else $('deco-state').textContent='Deco: on · '+(decoState.host||'mesh');
  if(!haState.enabled)$('ha-state').textContent='Cluster: off';
- else if(haState.role==='leader')$('ha-state').textContent='Cluster: active · '+(haState.local_ip||haState.hostname||'leader');
+ else if(haState.role==='leader'){
+  const dnsWarn=String(haState.message||'').includes('DNS update failed')||String(haState.message||'').includes('cluster store unavailable');
+  $('ha-state').textContent=dnsWarn
+    ?('Cluster: active · '+(haState.local_ip||haState.hostname||'leader')+' · DNS offline')
+    :('Cluster: active · '+(haState.local_ip||haState.hostname||'leader'));
+ }
  else if(haState.role==='follower')$('ha-state').textContent='Cluster: standby · '+(haState.leader?.ip||haState.hostname||'watching');
  else $('ha-state').textContent='Cluster: '+(haState.message||haState.role||'starting');
 }

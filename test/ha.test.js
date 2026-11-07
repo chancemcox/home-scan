@@ -59,10 +59,12 @@ test('Cloudflare DNS 403 does not pause local scanning', async () => {
     ensureHaDns() { throw new CloudflareError('Cloudflare HTTP 403. Check token permissions or retry later.'); },
   }));
   node._wait = async () => {};
+  node._leadUntilStepDown = async () => {};
   await node.tick();
-  assert.equal(node.role, 'error');
+  assert.equal(node.role, 'leader');
   assert.match(node.message, /403/);
   assert.equal(node.acceptsScans(), true);
+  assert.equal(node.isLeader(), true);
   assert.equal(node.publicState().scanning, true);
 });
 

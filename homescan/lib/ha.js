@@ -193,9 +193,20 @@ export class Cluster {
     const ip = await this.ensureLocalIp();
     const name = this.resolveHostname();
     if (!name) throw new Error('Set HA_HOSTNAME or a base domain in Settings before enabling the cluster.');
-    this.cloudflare.ensureHaDns(ip, name);
+    let message = 'Active · claimed DNS (' + reason + ')';
+    try {
+      this.cloudflare.ensureHaDns(ip, name);
+    } catch (exc) {
+      // Token/DNS permission failures must not park the node in error — HA still
+      // needs a local leader so inventory keeps updating on this host.
+      if (exc instanceof CloudflareError || exc instanceof Error) {
+        const detail = String(exc.message || exc);
+        applog.warning('HA DNS claim skipped', { source: 'ha', detail });
+        message = 'Active · scanning · DNS update failed: ' + detail;
+      } else throw exc;
+    }
     this._generation += 1;
-    this._setRole('leader', 'Active · claimed DNS (' + reason + ')');
+    this._setRole('leader', message);
     return ip;
   }
   sharedInventory() {
@@ -310,7 +321,7 @@ export class Cluster {
   }
   async _leadUntilStepDown() {
     const name = this.resolveHostname();
-    this._setRole('leader', 'Active · scanning');
+    if (this.role !== 'leader' || !this.message) this._setRole('leader', 'Active · scanning');
     while (!this.stopped() && this.role === 'leader') {
       this.broadcast();
       await this._wait(HEARTBEAT * 1000);
@@ -347,8 +358,22 @@ export class Cluster {
       await this._wait(HEARTBEAT * 1000);
     } catch (exc) {
       if (exc instanceof ClusterStateError) {
-        applog.error('HA Durable Object error', { source: 'ha', detail: String(exc.message) });
-        this._setRole('error', String(exc.message));
+        const detail = String(exc.message || exc);
+        applog.error('HA Durable Object error', { source: 'ha', detail });
+        // Auth or store failures: lead locally so Home Assistant inventory continues.
+        if (/unauthorized|401|403|not configured|unreachable/i.test(detail)) {
+          try {
+            await this.claim('do-unavailable');
+            if (this.role === 'leader') {
+              this.message = 'Active · local leader · cluster store unavailable: ' + detail;
+              await this._leadUntilStepDown();
+              return;
+            }
+          } catch (claimExc) {
+            applog.warning('HA local claim after DO failure', { source: 'ha', detail: String(claimExc.message || claimExc) });
+          }
+        }
+        this._setRole('error', detail);
         await this._wait(5000);
       } else throw exc;
     }
