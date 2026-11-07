@@ -61,9 +61,9 @@ function parseNetwork(cidr) {
 
 function scanCidrsFromRoute(net) {
   if (!net || !net.private || net.loopback || net.linkLocal) return [];
-  // Keep ordinary LAN prefixes. Host routes stay /32 — expanding them to a /24
-  // forces nmap across a single next hop and stalls on RTTVAR for unreachable peers.
-  if (net.prefix >= 20 && net.prefix <= 32 && net.size <= 4096) return [net.cidr];
+  // Ordinary LAN prefixes only. Skip /31–/32 host routes — they multiply into
+  // dozens of nmap runs and never replace a proper fallback /24 sweep.
+  if (net.prefix >= 20 && net.prefix <= 30 && net.size <= 4096) return [net.cidr];
   return [];
 }
 
@@ -91,8 +91,10 @@ export function scanNetworkList() {
   const found = discoverScanNetworks();
   let fallback = [];
   try { fallback = parseScanNetworks(NETWORK); } catch { /* ignore invalid fallback */ }
+  // Configured subnets first so a lossy discovered route (e.g. 192.168.86.0/24)
+  // cannot delay the primary LAN sweep for minutes at a time.
   const out = [];
-  for (const cidr of [...found, ...fallback]) if (cidr && !out.includes(cidr)) out.push(cidr);
+  for (const cidr of [...fallback, ...found]) if (cidr && !out.includes(cidr)) out.push(cidr);
   return out;
 }
 
@@ -215,13 +217,13 @@ function nmapSubnet(cidr) {
     const child = spawn('nmap', [
       '-sn', '-n',
       '--max-retries', '1',
-      '--host-timeout', '2s',
-      '--max-rtt-timeout', '500ms',
+      '--host-timeout', '1500ms',
+      '--max-rtt-timeout', '400ms',
       '--initial-rtt-timeout', '100ms',
       '--min-parallelism', '64',
       '-oX', '-',
       String(cidr),
-    ], { timeout: 120_000 });
+    ], { timeout: 45_000, killSignal: 'SIGKILL' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -236,6 +238,7 @@ function nmapSubnet(cidr) {
             detail: nmapFailureMessage(stderr, code, signal),
           });
         }
+        applog.info(`nmap ${cidr} found ${hosts.length} host${hosts.length === 1 ? '' : 's'}`, { source: 'scanner' });
         resolve(hosts);
         return;
       }
@@ -257,7 +260,9 @@ async function scanner() {
     const started = storage.now();
     const hosts = [];
     const errors = [];
-    for (const net of scanNetworkList()) {
+    const nets = scanNetworkList();
+    for (const net of nets) {
+      applog.info(`nmap scanning ${net}`, { source: 'scanner' });
       try { hosts.push(...await nmapSubnet(net)); }
       catch (exc) {
         applog.exception('nmap scan failed for ' + net, { source: 'scanner', exc });
@@ -268,6 +273,11 @@ async function scanner() {
       storage.recordBatches(DB, [{ source: 'network', hosts, started, error: hosts.length || !errors.length ? null : errors.join('; ').slice(0, 1000) }]);
       cloudflare.wake.set();
       publish();
+      writeShareStatus();
+      applog.info(`scan cycle recorded ${hosts.length} host${hosts.length === 1 ? '' : 's'} across ${nets.length} network${nets.length === 1 ? '' : 's'}`, {
+        source: 'scanner',
+        detail: errors.length ? errors.join('; ').slice(0, 500) : '',
+      });
     } catch (exc) { applog.exception('scan record failed', { source: 'scanner', exc }); }
     await new Promise((resolve) => setTimeout(resolve, Math.max(0, INTERVAL * 1000 - (Date.now() - tick))));
   }
@@ -562,6 +572,37 @@ export function applyAddonOptions() {
   if (opts.ingest_token) { TOKEN = String(opts.ingest_token).trim(); process.env.INGEST_TOKEN = TOKEN; }
 }
 
+function writeShareStatus() {
+  const dir = '/share/homescan';
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { return; }
+  let cfg = {};
+  try { cfg = cloudflare.config(); } catch { cfg = {}; }
+  let zones = { count: 0, error: '' };
+  try {
+    const listed = cloudflare.listZones();
+    zones = { count: (listed.zones || []).length, error: listed.error || '' };
+  } catch (exc) { zones = { count: 0, error: String(exc.message || exc) }; }
+  const inventory = storage.inventory(DB);
+  const payload = {
+    at: new Date().toISOString(),
+    zone: cfg.zone_name || '',
+    suffix: cfg.suffix || '',
+    dns_subnet: cfg.dns_subnet || '',
+    token_set: Boolean(cfg.api_token),
+    token_prefix: cfg.api_token ? String(cfg.api_token).slice(0, 4) : '',
+    zones,
+    devices: inventory.devices.length,
+    seen: inventory.devices.filter((d) => d.online).length,
+    networks: scanNetworkList(),
+    ha: cluster ? cluster.publicState() : null,
+  };
+  try { fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify(payload, null, 2)); } catch { /* share may be missing */ }
+}
+
+function cloudflareConfigFile() {
+  return cloudflare?.configPath || process.env.CLOUDFLARE_CONFIG || '/data/cloudflare.json';
+}
+
 function importSharedCloudflareToken() {
   const candidates = [
     process.env.HOMESCAN_CF_TOKEN_FILE || '',
@@ -573,22 +614,67 @@ function importSharedCloudflareToken() {
     let token = '';
     try { token = fs.readFileSync(file, 'utf8').trim().split(/\r?\n/)[0].trim(); } catch { continue; }
     if (token.length < 20) continue;
+    const connectOnce = () => cloudflare.connect({
+      api_token: token,
+      zone_name: 'chancecox.com',
+      suffix: 'house.chancecox.com',
+      tunnel: true,
+    });
     try {
       let cfg = {};
       try { cfg = cloudflare.config(); } catch { cfg = {}; }
-      const result = cloudflare.connect({
-        api_token: token,
-        zone_name: cfg.zone_name || 'chancecox.com',
-        suffix: cfg.suffix || 'house.chancecox.com',
-        tunnel: true,
-      });
+      const result = connectOnce();
+      let after = {};
+      try { after = cloudflare.config(); } catch { after = {}; }
+      try {
+        cloudflare.saveDomain({
+          zone_id: after.zone_id,
+          suffix: 'house.chancecox.com',
+          dns_subnet: cfg.dns_subnet || after.dns_subnet || '192.168.2.0/24',
+        });
+      } catch (domainExc) {
+        applog.warning('Share import could not set DNS suffix', {
+          source: 'cloudflare',
+          detail: String(domainExc.message || domainExc),
+        });
+      }
       try { fs.unlinkSync(file); } catch { /* keep file if unlink fails */ }
       applog.info('Imported Cloudflare token from share', {
         source: 'cloudflare',
-        detail: JSON.stringify({ zone: result.zone_name || result.zone || '', suffix: result.suffix || '' }),
+        detail: JSON.stringify({ zone: result.zone || after.zone_name || '', suffix: 'house.chancecox.com' }),
       });
       return true;
     } catch (exc) {
+      // Zone-changed guard: clear the old zone ids and retry once for share imports.
+      if (/Zone changed/i.test(String(exc.message || exc))) {
+        try {
+          const pathName = cloudflareConfigFile();
+          const raw = JSON.parse(fs.readFileSync(pathName, 'utf8'));
+          delete raw.zone_id;
+          delete raw.zone_name;
+          delete raw.suffix;
+          fs.writeFileSync(pathName, JSON.stringify(raw));
+          const result = connectOnce();
+          let after = {};
+          try { after = cloudflare.config(); } catch { after = {}; }
+          try {
+            cloudflare.saveDomain({
+              zone_id: after.zone_id,
+              suffix: 'house.chancecox.com',
+              dns_subnet: '192.168.2.0/24',
+            });
+          } catch { /* suffix can be set in Settings */ }
+          try { fs.unlinkSync(file); } catch { /* ignore */ }
+          applog.info('Imported Cloudflare token from share after zone reset', {
+            source: 'cloudflare',
+            detail: JSON.stringify({ zone: result.zone || after.zone_name || '' }),
+          });
+          return true;
+        } catch (retryExc) {
+          applog.error('Shared Cloudflare token import failed', { source: 'cloudflare', detail: String(retryExc.message || retryExc) });
+          return false;
+        }
+      }
       applog.error('Shared Cloudflare token import failed', { source: 'cloudflare', detail: String(exc.message || exc) });
       return false;
     }
@@ -606,6 +692,7 @@ if (isMain) {
   try {
     init();
     importSharedCloudflareToken();
+    writeShareStatus();
     const server = http.createServer((req, res) => {
       const url = new URL(req.url, 'http://localhost');
       if (req.method === 'GET') handleGet(req, res, url.pathname, url.searchParams);
@@ -616,7 +703,10 @@ if (isMain) {
     server.listen(Number(process.env.PORT || 80), '0.0.0.0');
     cloudflare.run();
     cluster.run();
-    if (MODE === 'nmap') scanner();
+    if (MODE === 'nmap') {
+      applog.info('Scan networks', { source: 'scanner', detail: scanNetworkList().join(', ') || '(none)' });
+      scanner();
+    }
   } catch (exc) {
     applog.exception('HomeScan process crashed', { source: 'app', exc });
     throw exc;
