@@ -719,23 +719,16 @@ function importSharedCloudflareToken() {
     const connectOnce = () => cloudflare.connect({
       api_token: token,
       zone_name: 'chancecox.com',
-      suffix: 'house.chancecox.com',
       tunnel: true,
     });
     try {
-      let cfg = {};
-      try { cfg = cloudflare.config(); } catch { cfg = {}; }
       const result = connectOnce();
       let after = {};
       try { after = cloudflare.config(); } catch { after = {}; }
       try {
-        cloudflare.saveDomain({
-          zone_id: after.zone_id,
-          suffix: 'house.chancecox.com',
-          dns_subnet: cfg.dns_subnet || after.dns_subnet || '192.168.2.0/24',
-        });
+        cloudflare.saveDomain({ zone_id: after.zone_id, suffix: after.zone_name || '', dns_subnet: '' });
       } catch (domainExc) {
-        applog.warning('Share import could not set DNS suffix', {
+        applog.warning('Share import could not set Cloudflare zone', {
           source: 'cloudflare',
           detail: String(domainExc.message || domainExc),
         });
@@ -743,7 +736,7 @@ function importSharedCloudflareToken() {
       try { fs.unlinkSync(file); } catch { /* keep file if unlink fails */ }
       applog.info('Imported Cloudflare token from share', {
         source: 'cloudflare',
-        detail: JSON.stringify({ zone: result.zone || after.zone_name || '', suffix: 'house.chancecox.com' }),
+        detail: JSON.stringify({ zone: result.zone || after.zone_name || '' }),
       });
       return true;
     } catch (exc) {
@@ -760,12 +753,8 @@ function importSharedCloudflareToken() {
           let after = {};
           try { after = cloudflare.config(); } catch { after = {}; }
           try {
-            cloudflare.saveDomain({
-              zone_id: after.zone_id,
-              suffix: 'house.chancecox.com',
-              dns_subnet: '192.168.2.0/24',
-            });
-          } catch { /* suffix can be set in Settings */ }
+            cloudflare.saveDomain({ zone_id: after.zone_id, suffix: after.zone_name || '', dns_subnet: '' });
+          } catch { /* zone can be set in Settings */ }
           try { fs.unlinkSync(file); } catch { /* ignore */ }
           applog.info('Imported Cloudflare token from share after zone reset', {
             source: 'cloudflare',

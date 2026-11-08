@@ -65,7 +65,7 @@ test('local DNS domain can be a subdomain under the Cloudflare zone', () => {
   assert.throws(() => suffixUnderZone('other.com', 'example.com'), /subdomain/);
 });
 
-test('DNS subnet constrains which LAN IPs local DNS may publish', () => {
+test('DNS subnet helper still validates private CIDRs for legacy config', () => {
   assert.equal(parseDnsSubnet(''), '');
   assert.equal(parseDnsSubnet('192.168.1.0/24'), '192.168.1.0/24');
   assert.equal(ipInCidr('192.168.1.50', '192.168.1.0/24'), true);
