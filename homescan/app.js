@@ -2,6 +2,13 @@
 const BASE=(document.querySelector('meta[name="homescan-base"]')||{}).content||'';
 const url=path=>BASE+path;
 const $=id=>document.getElementById(id);
+function lowerDomain(value){return String(value||'').toLowerCase()}
+function bindLowercaseInput(id){
+ const el=$(id);if(!el)return;
+ const apply=()=>{const next=lowerDomain(el.value);if(el.value!==next){const start=el.selectionStart,end=el.selectionEnd;el.value=next;if(typeof start==='number'&&typeof end==='number')try{el.setSelectionRange(start,end)}catch(_){}}};
+ el.addEventListener('input',apply);
+ el.addEventListener('blur',apply);
+}
 let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},haState={enabled:false,role:'',scanning:true},scanNetworks=[],configuredNetworks=[],selected=null,editingTunnel=null,editingTunnelDetail=null,tunnelInventory=[],zoneInventory=[],editScanNetworks=[];
 let sortKey='hostname',sortDir=1;
 let suffix='';
@@ -297,7 +304,7 @@ async function openSettings(){
 }
 function requireAuth(r){if(r.status===401){location.replace(url('/login'));throw Error('Sign in required.')}return r}
 async function post(path,body){const r=requireAuth(await fetch(url(path),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}));const result=await r.json();if(!r.ok)throw Error(result.error||'Request failed');return result}
-$('device-form').addEventListener('submit',async event=>{event.preventDefault();$('save-button').disabled=true;$('form-error').textContent='';try{await post('/api/cloudflare/settings',{device_id:selected,local:{enabled:$('local-enabled').checked,hostname:$('local-host').value},tunnel:{enabled:$('tunnel-enabled').checked,hostname:$('tunnel-host').value,protocol:$('tunnel-protocol').value,port:Number($('tunnel-port').value)}});$('device-dialog').close();await refresh()}catch(e){$('form-error').textContent=e.message}finally{$('save-button').disabled=false}});
+$('device-form').addEventListener('submit',async event=>{event.preventDefault();$('save-button').disabled=true;$('form-error').textContent='';try{await post('/api/cloudflare/settings',{device_id:selected,local:{enabled:$('local-enabled').checked,hostname:lowerDomain($('local-host').value)},tunnel:{enabled:$('tunnel-enabled').checked,hostname:lowerDomain($('tunnel-host').value),protocol:$('tunnel-protocol').value,port:Number($('tunnel-port').value)}});$('device-dialog').close();await refresh()}catch(e){$('form-error').textContent=e.message}finally{$('save-button').disabled=false}});
 $('settings-form').addEventListener('submit',async event=>{
  event.preventDefault();$('settings-save').disabled=true;$('settings-error').textContent='';
  try{
@@ -307,7 +314,8 @@ $('settings-form').addEventListener('submit',async event=>{
   if(cf.configured){
    const zoneId=$('dns-zone').value;
    if(!zoneId)throw Error('Choose a Cloudflare zone.');
-   const dnsDomain=$('dns-suffix').value.trim();
+   const dnsDomain=lowerDomain($('dns-suffix').value).trim();
+   $('dns-suffix').value=dnsDomain;
    const domain=await post('/api/cloudflare/domain',{zone_id:zoneId,suffix:dnsDomain,dns_subnet:$('dns-subnet').value.trim()});
    cf.suffix=domain.suffix;cf.zone=domain.zone||domain.suffix;cf.zone_id=domain.zone_id||zoneId;cf.dns_subnet=domain.dns_subnet||'';
    if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
@@ -339,7 +347,8 @@ $('tunnel-link-save').addEventListener('click',async()=>{
  try{const rule=editingTunnelDetail.config.ingress[Number($('tunnel-link-rule').value)];await post('/api/cloudflare/tunnels/link',{tunnel_id:editingTunnel,hostname:rule.hostname||'',path:rule.path||'',device_id:$('tunnel-link-device').value});await reloadTunnelDetail()}
  catch(e){$('tunnel-edit-error').textContent=e.message}finally{$('tunnel-link-save').disabled=false}
 });
-$('create-route-form').addEventListener('submit',async event=>{event.preventDefault();$('create-route-save').disabled=true;$('create-route-error').textContent='';try{const created=await post('/api/cloudflare/tunnels/create-route',{tunnel_id:$('create-route-tunnel').value,zone_id:$('create-route-zone').value,hostname:$('create-route-host').value,device_id:$('create-route-device').value,protocol:$('create-route-protocol').value,port:Number($('create-route-port').value)});$('create-route-host').value='';$('create-route-error').textContent='';await loadTunnels();await refresh();$('create-route-host').placeholder=created.hostname?`Added ${created.hostname}. Add another?`:'files'}catch(e){$('create-route-error').textContent=e.message}finally{$('create-route-save').disabled=false}});
+$('create-route-form').addEventListener('submit',async event=>{event.preventDefault();$('create-route-save').disabled=true;$('create-route-error').textContent='';try{const created=await post('/api/cloudflare/tunnels/create-route',{tunnel_id:$('create-route-tunnel').value,zone_id:$('create-route-zone').value,hostname:lowerDomain($('create-route-host').value),device_id:$('create-route-device').value,protocol:$('create-route-protocol').value,port:Number($('create-route-port').value)});$('create-route-host').value='';$('create-route-error').textContent='';await loadTunnels();await refresh();$('create-route-host').placeholder=created.hostname?`Added ${created.hostname}. Add another?`:'files'}catch(e){$('create-route-error').textContent=e.message}finally{$('create-route-save').disabled=false}});
+for(const id of ['dns-suffix','local-host','tunnel-host','create-route-host'])bindLowercaseInput(id);
 for(const id of ['local-enabled','tunnel-enabled'])$(id).addEventListener('change',updateFields);
 $('deco-enabled').addEventListener('change',updateDecoFields);
 for(const button of document.querySelectorAll('[data-close]'))button.addEventListener('click',()=>$(button.dataset.close).close());
