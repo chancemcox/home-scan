@@ -53,6 +53,7 @@ test('cluster DNS prefers the connected Cloudflare zone over a mismatched base d
 });
 
 test('scan networks accept several private subnets', () => {
+  assert.deepEqual(parseScanNetworks(''), []);
   assert.deepEqual(parseScanNetworks('192.168.2.0/24, 10.0.0.0/24'), ['192.168.2.0/24', '10.0.0.0/24']);
   assert.throws(() => parseScanNetworks('8.8.8.8/32'), /private/);
   assert.throws(() => parseScanNetworks('not-a-subnet'), /not an IPv4 subnet/);

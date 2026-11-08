@@ -50,9 +50,15 @@
 <div class="dialog-head"><div><small class="eyebrow">HOME SCAN</small><h2>Settings</h2></div><button type="button" class="close" data-close="settings-dialog" aria-label="Close settings">×</button></div>
 <p>HomeScan scans the private subnets this host can reach. Choose a Cloudflare zone and optional DNS subdomain for devices, and optionally configure Deco mesh inventory. When Deco is unreachable or turned off, network scanning continues normally.</p>
 <fieldset>
-<legend>Subnets being scanned</legend>
-<p id="scan-networks" class="mono">Looking up reachable subnets…</p>
-<small>Taken from this host’s routes. Docker, Home Assistant, and other virtual networks are skipped, as are subnets larger than 4096 addresses.</small>
+<legend>IP ranges to scan</legend>
+<div id="scan-network-list" class="scan-network-list" aria-live="polite"></div>
+<div class="scan-network-add">
+  <label for="scan-network-input" class="sr-only">Add IPv4 subnet</label>
+  <input id="scan-network-input" placeholder="192.168.86.0/24" autocomplete="off" spellcheck="false">
+  <button type="button" id="scan-network-add">Add range</button>
+</div>
+<small>Private IPv4 subnets with at most 4096 addresses (for example <span class="mono">192.168.2.0/24</span>). On-link routes discovered on this host are still scanned in addition to this list.</small>
+<p id="scan-networks-discovered" class="mono scan-discovered"></p>
 </fieldset>
 <fieldset>
 <legend>Cloudflare DNS</legend>

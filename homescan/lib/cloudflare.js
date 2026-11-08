@@ -120,7 +120,7 @@ void network;
 export function parseScanNetworks(value, limit = 16) {
   const text = Array.isArray(value) ? value.map(String).join('\n') : String(value || '');
   const parts = text.split(/[\s,;]+/).map((part) => part.trim()).filter(Boolean);
-  if (!parts.length) throw new Error('Enter one or more private IPv4 subnets, such as 192.168.1.0/24.');
+  if (!parts.length) return [];
   if (parts.length > limit) throw new Error(`Use at most ${limit} subnets.`);
   const nets = [];
   for (const part of parts) {

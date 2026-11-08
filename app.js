@@ -2,7 +2,7 @@
 const BASE=(document.querySelector('meta[name="homescan-base"]')||{}).content||'';
 const url=path=>BASE+path;
 const $=id=>document.getElementById(id);
-let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},haState={enabled:false,role:'',scanning:true},scanNetworks=[],selected=null,editingTunnel=null,editingTunnelDetail=null,tunnelInventory=[],zoneInventory=[];
+let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},haState={enabled:false,role:'',scanning:true},scanNetworks=[],configuredNetworks=[],selected=null,editingTunnel=null,editingTunnelDetail=null,tunnelInventory=[],zoneInventory=[],editScanNetworks=[];
 let sortKey='hostname',sortDir=1;
 let suffix='';
 let socket=null,reconnectTimer=0,pollTimer=0,haveData=false,live=false,backoff=2000,refreshing=false;
@@ -231,8 +231,56 @@ async function fillSettingsDomain(){
   }
  }catch(e){placeholder(e.message||'Could not load domains')}
 }
+function renderScanNetworks(){
+ const list=$('scan-network-list');
+ if(!list)return;
+ list.replaceChildren();
+ if(!editScanNetworks.length){
+  const empty=document.createElement('p');
+  empty.className='scan-network-empty';
+  empty.textContent='No custom ranges yet. Add one below, or rely on discovered on-link subnets.';
+  list.append(empty);
+ }else{
+  for(const cidr of editScanNetworks){
+   const row=document.createElement('div');
+   row.className='scan-network-row';
+   const label=document.createElement('span');
+   label.className='mono';
+   label.textContent=cidr;
+   const remove=document.createElement('button');
+   remove.type='button';
+   remove.textContent='Remove';
+   remove.addEventListener('click',()=>{
+    editScanNetworks=editScanNetworks.filter(item=>item!==cidr);
+    renderScanNetworks();
+   });
+   row.append(label,remove);
+   list.append(row);
+  }
+ }
+ const discovered=(scanNetworks||[]).filter(cidr=>!editScanNetworks.includes(cidr));
+ const note=$('scan-networks-discovered');
+ if(note)note.textContent=discovered.length?('Also scanning from host routes:\n'+discovered.join('\n')):'';
+}
+function addScanNetwork(){
+ const input=$('scan-network-input');
+ const raw=(input?.value||'').trim();
+ if(!raw)return;
+ try{
+  // Client-side shape check; server validates fully on save.
+  if(!/^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(raw))throw Error('Use CIDR form such as 192.168.86.0/24.');
+  if(editScanNetworks.includes(raw))throw Error('That range is already listed.');
+  if(editScanNetworks.length>=16)throw Error('Use at most 16 subnets.');
+  editScanNetworks=[...editScanNetworks,raw];
+  input.value='';
+  $('settings-error').textContent='';
+  renderScanNetworks();
+ }catch(e){$('settings-error').textContent=e.message}
+}
 async function openSettings(){
- $('scan-networks').textContent=(scanNetworks||[]).join('\n')||'No reachable private subnet found yet.';
+ editScanNetworks=[...(configuredNetworks.length?configuredNetworks:scanNetworks||[])];
+ renderScanNetworks();
+ $('scan-network-input').value='';
  $('deco-enabled').checked=!!decoState.enabled;
  $('deco-host').value=decoState.host||'';
  $('deco-username').value=decoState.username||'admin';
@@ -253,6 +301,9 @@ $('device-form').addEventListener('submit',async event=>{event.preventDefault();
 $('settings-form').addEventListener('submit',async event=>{
  event.preventDefault();$('settings-save').disabled=true;$('settings-error').textContent='';
  try{
+  const savedNets=await post('/api/scan/networks',{networks:editScanNetworks});
+  configuredNetworks=savedNets.networks||editScanNetworks.slice();
+  scanNetworks=[...new Set([...(configuredNetworks||[]),...(scanNetworks||[])])];
   if(cf.configured){
    const zoneId=$('dns-zone').value;
    if(!zoneId)throw Error('Choose a Cloudflare zone.');
@@ -268,9 +319,12 @@ $('settings-form').addEventListener('submit',async event=>{
   decoState=await post('/api/deco/settings',body);
   $('settings-dialog').close();
   applyStatus();
+  await refresh();
  }catch(e){$('settings-error').textContent=e.message}
  finally{$('settings-save').disabled=false}
 });
+$('scan-network-add')?.addEventListener('click',addScanNetwork);
+$('scan-network-input')?.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();addScanNetwork()}});
 $('tunnel-form').addEventListener('submit',async event=>{
  event.preventDefault();$('tunnel-edit-save').disabled=true;$('tunnel-edit-error').textContent='';
  try{
@@ -366,7 +420,7 @@ function inventoryNotice(j){
 function apply(j){
  if(!j||!Array.isArray(j.devices)||!j.cloudflare||!Array.isArray(j.cloudflare.routes))return;
  haveData=true;backoff=2000;
- data=j.devices;cf=j.cloudflare;decoState=j.deco||decoState;haState=j.ha||haState;scanNetworks=Array.isArray(j.networks)?j.networks:scanNetworks;
+ data=j.devices;cf=j.cloudflare;decoState=j.deco||decoState;haState=j.ha||haState;scanNetworks=Array.isArray(j.networks)?j.networks:scanNetworks;configuredNetworks=Array.isArray(j.configured_networks)?j.configured_networks:configuredNetworks;
  if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
  else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set DNS subdomain)'}
  $('total').textContent=data.length;$('online').textContent=data.filter(d=>d.online).length;$('route-count').textContent=cf.routes.filter(r=>r.enabled).length;

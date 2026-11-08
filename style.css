@@ -8,5 +8,15 @@ textarea{width:100%;padding:12px;background:#0e192a;border:1px solid #38506c;col
 
 .button-link{display:inline-block;padding:10px 15px;border:1px solid var(--mint);border-radius:8px;text-decoration:none;font-size:15px;line-height:normal}.button-link:hover{filter:brightness(1.08)}.button-link:focus-visible{outline:2px solid var(--mint);outline-offset:3px}.setup-permissions{padding-left:22px;line-height:1.9;color:var(--muted)}dialog h3{font-size:16px;margin-top:24px}
 #scan-networks{white-space:pre-wrap}
+.scan-network-list{display:flex;flex-direction:column;gap:8px;margin:4px 0 12px}
+.scan-network-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#0e192a}
+.scan-network-row .mono{font-size:13px}
+.scan-network-row button{padding:6px 10px;flex:none}
+.scan-network-add{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+.scan-network-add input{flex:1;margin:0}
+.scan-network-add button{flex:none;white-space:nowrap}
+.scan-discovered{margin:8px 0 0;font-size:12px;white-space:pre-wrap}
+.scan-discovered:empty{display:none}
+.scan-network-empty{color:var(--muted);font-size:13px;margin:0}
 .login-page{min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at top, #1a2d46 0%, var(--bg) 55%)}.login-shell{width:min(420px,calc(100vw - 28px));margin:24px}.login-card{background:linear-gradient(160deg,#18283e,#121e30);border:1px solid var(--line);border-radius:16px;padding:28px}.login-card h1{margin:8px 0 10px}.login-card .primary{width:100%;margin-top:8px}.remember{margin:14px 0 6px}
 

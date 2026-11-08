@@ -89,10 +89,14 @@ export function discoverScanNetworks(routeText = null) {
   return found;
 }
 
+export function configuredScanNetworks() {
+  try { return parseScanNetworks(NETWORK); }
+  catch { return []; }
+}
+
 export function scanNetworkList() {
   const found = discoverScanNetworks();
-  let fallback = [];
-  try { fallback = parseScanNetworks(NETWORK); } catch { /* ignore invalid fallback */ }
+  const fallback = configuredScanNetworks();
   // Configured subnets first so a lossy discovered route (e.g. 192.168.86.0/24)
   // cannot delay the primary LAN sweep for minutes at a time.
   const out = [];
@@ -153,6 +157,7 @@ function devicesPayload() {
           result.cloudflare = cloudflare.publicState();
           result.deco = deco.publicState();
           result.networks = scanNetworkList();
+          result.configured_networks = configuredScanNetworks();
           return JSON.stringify(result);
         }
       } catch { /* fall through */ }
@@ -164,6 +169,7 @@ function devicesPayload() {
     mode: MODE,
     network: MODE === 'nmap' ? nets.join(', ') : 'Home network',
     networks: nets,
+    configured_networks: configuredScanNetworks(),
     cloudflare: cloudflare.publicState(),
     deco: deco.publicState(),
     ha: cluster.publicState(),
@@ -696,6 +702,7 @@ function writeShareStatus() {
     with_mac: inventory.devices.filter((d) => d.mac).length,
     with_name: inventory.devices.filter((d) => d.hostname).length,
     networks: scanNetworkList(),
+    configured_networks: configuredScanNetworks(),
     ha: cluster ? cluster.publicState() : null,
   };
   try { fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify(payload, null, 2)); } catch { /* share may be missing */ }
