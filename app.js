@@ -194,6 +194,13 @@ function updateDecoFields(){
  for(const id of ['deco-host','deco-username','deco-password'])$(id).disabled=!on;
  $('deco-host').required=on;
 }
+function syncDnsDomainPlaceholder(){
+ const zone=zoneInventory.find(z=>z.id===$('dns-zone').value);
+ const input=$('dns-suffix');
+ if(!input)return;
+ input.placeholder=zone?('house.'+zone.name):'house.example.com';
+ if(!input.value.trim()&&zone)input.value=cf.suffix&&(cf.suffix===zone.name||cf.suffix.endsWith('.'+zone.name))?cf.suffix:zone.name;
+}
 function updateDnsZoneCount(){
  const el=$('dns-zone-count');
  if(!el)return;
@@ -203,16 +210,19 @@ function updateDnsZoneCount(){
 }
 async function fillSettingsDomain(){
  const select=$('dns-zone');
- const placeholder=(text)=>{select.replaceChildren();const o=document.createElement('option');o.value='';o.textContent=text;select.append(o);select.required=false;if($('dns-zone-filter'))$('dns-zone-filter').disabled=true;updateDnsZoneCount()};
+ const placeholder=(text)=>{select.replaceChildren();const o=document.createElement('option');o.value='';o.textContent=text;select.append(o);select.required=false;$('dns-suffix').disabled=true;$('dns-subnet').disabled=true;if($('dns-zone-filter'))$('dns-zone-filter').disabled=true;updateDnsZoneCount()};
  if(!cf.configured){placeholder('Connect Cloudflare to load domains');select.disabled=true;return}
- select.disabled=false;if($('dns-zone-filter'))$('dns-zone-filter').disabled=false;
+ select.disabled=false;$('dns-suffix').disabled=false;$('dns-subnet').disabled=false;if($('dns-zone-filter'))$('dns-zone-filter').disabled=false;
  try{
   await loadZones();
   if(!zoneInventory.length){placeholder('No domains on this token');return}
   const current=zoneInventory.find(z=>z.id===cf.zone_id)||zoneInventory.find(z=>z.name===cf.zone)||zoneInventory.find(z=>cf.suffix===z.name||(cf.suffix||'').endsWith('.'+z.name))||zoneInventory[0];
   fillZoneSelect(select,current.id,$('dns-zone-filter')?.value||'');
   select.required=true;
+  $('dns-suffix').value=cf.suffix||current.name||'';
+  $('dns-subnet').value=cf.dns_subnet||'';
   updateDnsZoneCount();
+  syncDnsDomainPlaceholder();
  }catch(e){placeholder(e.message||'Could not load domains')}
 }
 async function openSettings(){
@@ -226,6 +236,8 @@ async function openSettings(){
  updateDecoFields();
  $('dns-zone').replaceChildren();
  const loading=document.createElement('option');loading.value='';loading.textContent='Loading domains…';$('dns-zone').append(loading);
+ $('dns-suffix').value=cf.suffix||'';
+ $('dns-subnet').value=cf.dns_subnet||'';
  $('settings-dialog').showModal();
  await fillSettingsDomain();
 }
@@ -238,11 +250,12 @@ $('settings-form').addEventListener('submit',async event=>{
   if(cf.configured){
    const zoneId=$('dns-zone').value;
    if(!zoneId)throw Error('Choose a Cloudflare zone.');
-   const zone=zoneInventory.find(z=>z.id===zoneId);
-   const domain=await post('/api/cloudflare/domain',{zone_id:zoneId,suffix:zone?.name||'',dns_subnet:''});
-   cf.suffix=domain.suffix;cf.zone=domain.zone||domain.suffix;cf.zone_id=domain.zone_id||zoneId;cf.dns_subnet='';
+   const dnsDomain=$('dns-suffix').value.trim();
+   if(!dnsDomain)throw Error('Enter a DNS subdomain such as house.example.com.');
+   const domain=await post('/api/cloudflare/domain',{zone_id:zoneId,suffix:dnsDomain,dns_subnet:$('dns-subnet').value.trim()});
+   cf.suffix=domain.suffix;cf.zone=domain.zone||domain.suffix;cf.zone_id=domain.zone_id||zoneId;cf.dns_subnet=domain.dns_subnet||'';
    if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
-   else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set Cloudflare zone)'}
+   else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set DNS subdomain)'}
   }
   const body={enabled:$('deco-enabled').checked,host:$('deco-host').value.trim(),username:$('deco-username').value.trim()||'admin'};
   const password=$('deco-password').value;
@@ -307,6 +320,16 @@ $('sync-button').addEventListener('click',async()=>{try{await post('/api/cloudfl
 $('dns-zone-filter')?.addEventListener('input',()=>{
  fillZoneSelect($('dns-zone'),$('dns-zone').value,$('dns-zone-filter').value);
 });
+$('dns-zone')?.addEventListener('change',()=>{
+ const zone=zoneInventory.find(z=>z.id===$('dns-zone').value);
+ if(!zone)return;
+ const current=$('dns-suffix').value.trim().toLowerCase().replace(/\.+$/,'');
+ if(!current||current===(cf.zone||'')||current.endsWith('.'+(cf.zone||''))){
+  const keep=current&&(current===zone.name||current.endsWith('.'+zone.name))?current:'';
+  $('dns-suffix').value=keep||(cf.suffix&&(cf.suffix===zone.name||cf.suffix.endsWith('.'+zone.name))?cf.suffix:zone.name);
+ }
+ syncDnsDomainPlaceholder();
+});
 $('search').addEventListener('input',render);
 $('filter-status').addEventListener('change',render);
 $('filter-cloudflare').addEventListener('change',render);
@@ -337,7 +360,7 @@ function apply(j){
  haveData=true;backoff=2000;
  data=j.devices;cf=j.cloudflare;decoState=j.deco||decoState;haState=j.ha||haState;scanNetworks=Array.isArray(j.networks)?j.networks:scanNetworks;
  if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
- else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set Cloudflare zone)'}
+ else{suffix='';for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent='.(set DNS subdomain)'}
  $('total').textContent=data.length;$('online').textContent=data.filter(d=>d.online).length;$('route-count').textContent=cf.routes.filter(r=>r.enabled).length;
  if(haState.enabled&&haState.role==='follower')$('status').textContent='Standby node';
  else $('status').textContent=j.stale?'Awaiting scanner':'● Scanner active';

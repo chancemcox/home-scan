@@ -17,8 +17,8 @@
 <footer><span id="meta"></span><p>Devices are identified by MAC address. IP-only discoveries need a MAC before Cloudflare sync can be enabled.</p></footer>
 </main>
 <dialog id="device-dialog"><form id="device-form"><div class="dialog-head"><div><small class="eyebrow">DEVICE SETTINGS</small><h2 id="device-title">Cloudflare sync</h2></div><button type="button" class="close" data-close="device-dialog" aria-label="Close device settings">×</button></div><p id="device-identity" class="mono"></p><p id="device-current"></p>
-<fieldset><legend><label class="toggle"><input id="local-enabled" type="checkbox">Local DNS sync</label></legend><p>Resolve this hostname directly to the device’s private LAN IP.</p><label for="local-host">Hostname</label><div class="hostname-input"><input id="local-host" placeholder="nas" autocomplete="off"><span class="dns-suffix-label"></span></div><small>DNS only. Reachable from your home network or VPN. Uses the Cloudflare zone from Settings.</small></fieldset>
-<fieldset><legend><label class="toggle"><input id="tunnel-enabled" type="checkbox">Cloudflare Tunnel</label></legend><p>Publish this web service through a Cloudflare tunnel.</p><label for="tunnel-host">Hostname</label><input id="tunnel-host" placeholder="nas-web or app.example.com" autocomplete="off"><div class="split"><div><label for="tunnel-protocol">Service protocol</label><select id="tunnel-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div><div><label for="tunnel-port">Service port</label><input id="tunnel-port" type="number" min="1" max="65535" value="80"></div></div><small id="tunnel-host-hint">Short labels use the Cloudflare zone from Settings. Full names can use any Cloudflare domain this token can edit. Matching certificate coverage is required for HTTPS.</small></fieldset>
+<fieldset><legend><label class="toggle"><input id="local-enabled" type="checkbox">Local DNS sync</label></legend><p>Resolve this hostname directly to the device’s private LAN IP.</p><label for="local-host">Hostname</label><div class="hostname-input"><input id="local-host" placeholder="nas" autocomplete="off"><span class="dns-suffix-label"></span></div><small>DNS only. Reachable from your home network or VPN. Set the DNS subdomain in Settings.</small></fieldset>
+<fieldset><legend><label class="toggle"><input id="tunnel-enabled" type="checkbox">Cloudflare Tunnel</label></legend><p>Publish this web service through a Cloudflare tunnel.</p><label for="tunnel-host">Hostname</label><input id="tunnel-host" placeholder="nas-web or app.example.com" autocomplete="off"><div class="split"><div><label for="tunnel-protocol">Service protocol</label><select id="tunnel-protocol"><option value="http">HTTP</option><option value="https">HTTPS</option></select></div><div><label for="tunnel-port">Service port</label><input id="tunnel-port" type="number" min="1" max="65535" value="80"></div></div><small id="tunnel-host-hint">Short labels use the DNS subdomain from Settings. Full names can use any Cloudflare domain this token can edit. Matching certificate coverage is required for HTTPS.</small></fieldset>
 <p class="hint">Both modes can be enabled using different hostnames. Turning a mode off removes its HomeScan-managed DNS record and tunnel route.</p><p id="form-error" class="error" role="alert"></p><div class="dialog-actions"><button type="button" data-close="device-dialog">Cancel</button><button id="save-button" class="primary" type="submit">Save settings</button></div></form></dialog>
 <dialog id="connection-dialog">
 <form id="connection-form">
@@ -48,21 +48,27 @@
 <dialog id="settings-dialog">
 <form id="settings-form">
 <div class="dialog-head"><div><small class="eyebrow">HOME SCAN</small><h2>Settings</h2></div><button type="button" class="close" data-close="settings-dialog" aria-label="Close settings">×</button></div>
-<p>HomeScan scans the private subnets this host can reach. Choose the Cloudflare zone used for device DNS and tunnel hostnames, and optionally configure Deco mesh inventory. When Deco is unreachable or turned off, network scanning continues normally.</p>
+<p>HomeScan scans the private subnets this host can reach. Choose a Cloudflare zone and optional DNS subdomain for devices, and optionally configure Deco mesh inventory. When Deco is unreachable or turned off, network scanning continues normally.</p>
 <fieldset>
 <legend>Subnets being scanned</legend>
 <p id="scan-networks" class="mono">Looking up reachable subnets…</p>
 <small>Taken from this host’s routes. Docker, Home Assistant, and other virtual networks are skipped, as are subnets larger than 4096 addresses.</small>
 </fieldset>
 <fieldset>
-<legend>Cloudflare zone</legend>
+<legend>Cloudflare DNS</legend>
 <label for="dns-zone-filter">Filter zones</label>
 <input id="dns-zone-filter" type="search" placeholder="Search domains…" autocomplete="off" spellcheck="false">
 <label for="dns-zone">Cloudflare zone</label>
 <select id="dns-zone" required size="8">
   <option value="">Loading domains…</option>
 </select>
-<small id="dns-zone-count">Zones this API token can access. Device DNS and tunnel short names use this zone (for example <span class="mono">nas.example.com</span>).</small>
+<small id="dns-zone-count">Zones this API token can access.</small>
+<label for="dns-suffix">DNS subdomain for devices</label>
+<input id="dns-suffix" placeholder="house.example.com" autocomplete="off" spellcheck="false">
+<small>Hostnames become <span class="mono">name.&lt;subdomain&gt;</span> — for example <span class="mono">nas.house.example.com</span>. Must be the selected zone or a subdomain of it.</small>
+<label for="dns-subnet">Subnet for DNS targets</label>
+<input id="dns-subnet" placeholder="192.168.1.0/24" autocomplete="off" spellcheck="false">
+<small>Optional. Local DNS and tunnel origins only sync when the device IP is inside this private subnet. Leave blank to allow any scanned LAN IP.</small>
 </fieldset>
 <fieldset>
 <legend><label class="toggle"><input id="deco-enabled" type="checkbox">Deco support</label></legend>
