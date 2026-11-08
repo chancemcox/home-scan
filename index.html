@@ -64,8 +64,8 @@
 </select>
 <small id="dns-zone-count">Zones this API token can access.</small>
 <label for="dns-suffix">DNS subdomain for devices</label>
-<input id="dns-suffix" placeholder="house.example.com" autocomplete="off" spellcheck="false">
-<small>Hostnames become <span class="mono">name.&lt;subdomain&gt;</span> — for example <span class="mono">nas.house.example.com</span>. Must be the selected zone or a subdomain of it.</small>
+<input id="dns-suffix" placeholder="house" autocomplete="off" spellcheck="false">
+<small>Enter a short label (<span class="mono">house</span>) or a full name under the selected zone (<span class="mono">house.example.com</span>). Device hostnames become <span class="mono">nas.house.example.com</span>.</small>
 <label for="dns-subnet">Subnet for DNS targets</label>
 <input id="dns-subnet" placeholder="192.168.1.0/24" autocomplete="off" spellcheck="false">
 <small>Optional. Local DNS and tunnel origins only sync when the device IP is inside this private subnet. Leave blank to allow any scanned LAN IP.</small>

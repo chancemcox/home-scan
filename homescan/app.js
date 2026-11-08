@@ -198,8 +198,12 @@ function syncDnsDomainPlaceholder(){
  const zone=zoneInventory.find(z=>z.id===$('dns-zone').value);
  const input=$('dns-suffix');
  if(!input)return;
- input.placeholder=zone?('house.'+zone.name):'house.example.com';
- if(!input.value.trim()&&zone)input.value=cf.suffix&&(cf.suffix===zone.name||cf.suffix.endsWith('.'+zone.name))?cf.suffix:zone.name;
+ input.placeholder=zone?'house':'house';
+ if(!input.value.trim()&&zone){
+  if(cf.suffix&&(cf.suffix===zone.name||cf.suffix.endsWith('.'+zone.name))){
+   input.value=cf.suffix===zone.name?'':(cf.suffix.endsWith('.'+zone.name)?cf.suffix.slice(0,-(zone.name.length+1)):cf.suffix);
+  }else input.value='';
+ }
 }
 function updateDnsZoneCount(){
  const el=$('dns-zone-count');
@@ -219,10 +223,12 @@ async function fillSettingsDomain(){
   const current=zoneInventory.find(z=>z.id===cf.zone_id)||zoneInventory.find(z=>z.name===cf.zone)||zoneInventory.find(z=>cf.suffix===z.name||(cf.suffix||'').endsWith('.'+z.name))||zoneInventory[0];
   fillZoneSelect(select,current.id,$('dns-zone-filter')?.value||'');
   select.required=true;
-  $('dns-suffix').value=cf.suffix||current.name||'';
   $('dns-subnet').value=cf.dns_subnet||'';
   updateDnsZoneCount();
   syncDnsDomainPlaceholder();
+  if(cf.suffix&&current){
+   $('dns-suffix').value=cf.suffix===current.name?'':(cf.suffix.endsWith('.'+current.name)?cf.suffix.slice(0,-(current.name.length+1)):cf.suffix);
+  }
  }catch(e){placeholder(e.message||'Could not load domains')}
 }
 async function openSettings(){
@@ -236,7 +242,7 @@ async function openSettings(){
  updateDecoFields();
  $('dns-zone').replaceChildren();
  const loading=document.createElement('option');loading.value='';loading.textContent='Loading domains…';$('dns-zone').append(loading);
- $('dns-suffix').value=cf.suffix||'';
+ $('dns-suffix').value='';
  $('dns-subnet').value=cf.dns_subnet||'';
  $('settings-dialog').showModal();
  await fillSettingsDomain();
@@ -251,7 +257,6 @@ $('settings-form').addEventListener('submit',async event=>{
    const zoneId=$('dns-zone').value;
    if(!zoneId)throw Error('Choose a Cloudflare zone.');
    const dnsDomain=$('dns-suffix').value.trim();
-   if(!dnsDomain)throw Error('Enter a DNS subdomain such as house.example.com.');
    const domain=await post('/api/cloudflare/domain',{zone_id:zoneId,suffix:dnsDomain,dns_subnet:$('dns-subnet').value.trim()});
    cf.suffix=domain.suffix;cf.zone=domain.zone||domain.suffix;cf.zone_id=domain.zone_id||zoneId;cf.dns_subnet=domain.dns_subnet||'';
    if(cf.suffix){suffix='.'+cf.suffix;for(const el of document.querySelectorAll('.hostname-input span,.dns-suffix-label'))el.textContent=suffix}
@@ -324,9 +329,12 @@ $('dns-zone')?.addEventListener('change',()=>{
  const zone=zoneInventory.find(z=>z.id===$('dns-zone').value);
  if(!zone)return;
  const current=$('dns-suffix').value.trim().toLowerCase().replace(/\.+$/,'');
- if(!current||current===(cf.zone||'')||current.endsWith('.'+(cf.zone||''))){
-  const keep=current&&(current===zone.name||current.endsWith('.'+zone.name))?current:'';
-  $('dns-suffix').value=keep||(cf.suffix&&(cf.suffix===zone.name||cf.suffix.endsWith('.'+zone.name))?cf.suffix:zone.name);
+ // Keep a short label; rewrite full names that belonged to the previous zone.
+ if(current.includes('.')){
+  if(current===(cf.zone||'')||current.endsWith('.'+(cf.zone||''))){
+   const keep=current===zone.name?'':(current.endsWith('.'+zone.name)?current.slice(0,-(zone.name.length+1)):'');
+   $('dns-suffix').value=keep||(cf.suffix&&cf.suffix.endsWith('.'+zone.name)?cf.suffix.slice(0,-(zone.name.length+1)):'');
+  }
  }
  syncDnsDomainPlaceholder();
 });

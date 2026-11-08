@@ -60,6 +60,7 @@ test('scan networks accept several private subnets', () => {
 
 test('local DNS domain can be a subdomain under the Cloudflare zone', () => {
   assert.equal(suffixUnderZone('', 'example.com'), 'example.com');
+  assert.equal(suffixUnderZone('house', 'example.com'), 'house.example.com');
   assert.equal(suffixUnderZone('house.example.com', 'example.com'), 'house.example.com');
   assert.equal(suffixUnderZone('*.house.example.com', 'example.com'), 'house.example.com');
   assert.throws(() => suffixUnderZone('other.com', 'example.com'), /subdomain/);
