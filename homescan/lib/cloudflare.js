@@ -660,10 +660,18 @@ export class Manager {
     }
     const records = api.call('GET', `/zones/${zoneId}/dns_records?` + new URLSearchParams({ name, per_page: '100' })) || [];
     const target = tunnelId + '.cfargotunnel.com';
-    if (records.some((record) => record.type !== 'CNAME' || record.content !== target)) throw new Error('An existing DNS record already owns this hostname.');
+    const cnames = records.filter((record) => record.type === 'CNAME');
+    const foreign = records.filter((record) => record.type !== 'CNAME');
+    if (foreign.length || cnames.length > 1) throw new Error('An existing DNS record already owns this hostname.');
     api.call('PUT', base + '/configurations', { config: { ...config, ingress: rules } });
-    if (!records.length) {
-      api.call('POST', `/zones/${zoneId}/dns_records`, { type: 'CNAME', name, content: target, proxied: true, ttl: 1, comment: 'homescan:tunnel-route' });
+    const desired = { type: 'CNAME', name, content: target, proxied: true, ttl: 1, comment: 'homescan:tunnel-route' };
+    if (cnames.length) {
+      const record = cnames[0];
+      if (Object.entries(desired).some(([key, value]) => record[key] !== value)) {
+        api.call('PUT', `/zones/${zoneId}/dns_records/${record.id}`, desired);
+      }
+    } else {
+      api.call('POST', `/zones/${zoneId}/dns_records`, desired);
     }
     return { ...this.saveTunnelLink({ tunnel_id: tunnelId, hostname: name, path: '', device_id: did }), hostname: name };
   }
@@ -704,17 +712,28 @@ export class Manager {
       const owned = storage.withDb(this.dbPath, (db) => db.execute("SELECT 1 FROM cf_resources WHERE kind='tunnel' AND hostname=?", [key[0]]).fetchone());
       if (owned) throw new Error('HomeScan-managed ingress rules must be removed from their device settings.');
     }
-    const response = api.call('GET', base + '/configurations') || {};
-    const config = response.config || { ingress: [{ service: 'http_status:404' }] };
-    const rules = [...(config.ingress || [])];
-    const matches = rules.map((rule, index) => sameJson(Manager.ruleKey(rule), key) ? index : -1).filter((index) => index >= 0);
-    if (matches.length !== 1) throw new Error('That hostname was not found as a unique ingress rule.');
-    rules.splice(matches[0], 1);
-    const desired = Manager.tunnelConfig({ ...config, ingress: rules });
-    api.call('PUT', base + '/configurations', { config: desired });
+    let tunnelMissing = false;
+    let response = {};
+    try { response = api.call('GET', base + '/configurations') || {}; }
+    catch (exc) {
+      if (!(exc instanceof CloudflareError)) throw exc;
+      tunnelMissing = true;
+    }
+    if (!tunnelMissing) {
+      const config = response.config || { ingress: [{ service: 'http_status:404' }] };
+      const rules = [...(config.ingress || [])];
+      const matches = rules.map((rule, index) => sameJson(Manager.ruleKey(rule), key) ? index : -1).filter((index) => index >= 0);
+      if (matches.length > 1) throw new Error('That hostname was not found as a unique ingress rule.');
+      if (matches.length === 1) {
+        rules.splice(matches[0], 1);
+        const desired = Manager.tunnelConfig({ ...config, ingress: rules });
+        api.call('PUT', base + '/configurations', { config: desired });
+      }
+    }
+    // Always clear orphan DNS for this hostname→tunnel even if ingress was already gone.
     if (key[0]) this._cleanupTunnelDns(api, cfg, tunnelId, key[0]);
     storage.withDb(this.dbPath, (db) => db.execute('DELETE FROM cf_tunnel_links WHERE tunnel_id=? AND hostname=? AND path=?', [tunnelId, ...key]));
-    return this.getTunnel(tunnelId);
+    return tunnelMissing ? { id: tunnelId, name: '', config: { ingress: [] }, links: [], homescan: tunnelId === cfg.tunnel_id, missing: true } : this.getTunnel(tunnelId);
   }
   deleteTunnel(body) {
     const tunnelId = Manager.tunnelId(body.tunnel_id);
