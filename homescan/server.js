@@ -230,7 +230,7 @@ export function parseNmapHosts(xml) {
 }
 
 export function normalizeHostname(value) {
-  const name = String(value || '').trim().replace(/\.+$/, '');
+  const name = String(value || '').trim().toLowerCase().replace(/\.+$/, '');
   if (!name || /^[\d.]+$/.test(name)) return '';
   return name.slice(0, 255);
 }

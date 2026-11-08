@@ -5,9 +5,18 @@ const $=id=>document.getElementById(id);
 function lowerDomain(value){return String(value||'').toLowerCase()}
 function bindLowercaseInput(id){
  const el=$(id);if(!el)return;
- const apply=()=>{const next=lowerDomain(el.value);if(el.value!==next){const start=el.selectionStart,end=el.selectionEnd;el.value=next;if(typeof start==='number'&&typeof end==='number')try{el.setSelectionRange(start,end)}catch(_){}}};
- el.addEventListener('input',apply);
- el.addEventListener('blur',apply);
+ el.autocapitalize='none';
+ el.spellcheck=false;
+ const apply=()=>{
+  const next=lowerDomain(el.value);
+  if(el.value===next)return;
+  const start=el.selectionStart,end=el.selectionEnd;
+  el.value=next;
+  if(document.activeElement===el&&typeof start==='number'&&typeof end==='number'){
+   try{el.setSelectionRange(Math.min(start,next.length),Math.min(end,next.length))}catch(_){}
+  }
+ };
+ for(const evt of ['input','change','blur','keyup','paste'])el.addEventListener(evt,()=>queueMicrotask(apply));
 }
 let data=[],cf={routes:[],configured:false},decoState={enabled:false,configured:false},haState={enabled:false,role:'',scanning:true},scanNetworks=[],configuredNetworks=[],selected=null,editingTunnel=null,editingTunnelDetail=null,tunnelInventory=[],zoneInventory=[],editScanNetworks=[];
 let sortKey='hostname',sortDir=1;
