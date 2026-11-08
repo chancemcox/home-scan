@@ -910,26 +910,19 @@ export class Manager {
     const zone = this.zoneFor(api, cfg, name);
     const matches = this.dnsRecords(api, cfg, name, zone);
     const mine = 'homescan:' + route.id;
-    if (matches.length > 1) {
-      throw new CloudflareError('Multiple DNS records own ' + name + '. Remove the extras in Cloudflare, then retry.');
-    }
-    if (matches.length === 1) {
-      const existing = matches[0];
-      const comment = String(existing.comment || '');
-      const adoptable = ['A', 'CNAME'].includes(existing.type)
-        && (comment === mine || comment.startsWith('homescan:') || !comment);
-      if (!adoptable) {
-        throw new CloudflareError('An existing DNS record owns this hostname. Choose another name or remove that record yourself.');
-      }
-    }
     let desired;
     if (route.kind === 'local') desired = { type: 'A', name, content: ip, proxied: false, ttl: 60, comment: mine };
     else {
       this.tunnelRule(api, cfg, name, `${route.protocol}://${ip}:${route.port}`, route.id);
       desired = { type: 'CNAME', name, content: cfg.tunnel_id + '.cfargotunnel.com', proxied: true, ttl: 1, comment: mine };
     }
+    // Device routes own this hostname: keep one matching A/CNAME, replace or remove the rest.
+    const sameType = matches.filter((record) => record.type === desired.type);
+    const other = matches.filter((record) => record.type !== desired.type);
+    for (const record of other) api.call('DELETE', `/zones/${zone.id}/dns_records/${record.id}`);
+    for (const record of sameType.slice(1)) api.call('DELETE', `/zones/${zone.id}/dns_records/${record.id}`);
     storage.withDb(this.dbPath, (db) => db.execute('INSERT OR IGNORE INTO cf_resources VALUES(?,?,?,NULL)', [route.id, name, route.kind]));
-    let record = matches[0] || null;
+    let record = sameType[0] || null;
     if (record) {
       if (Object.entries(desired).some(([key, value]) => record[key] !== value)) record = api.call('PUT', `/zones/${zone.id}/dns_records/${record.id}`, desired);
     } else record = api.call('POST', `/zones/${zone.id}/dns_records`, desired);
